@@ -1,0 +1,242 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "sqlite"
+  url = env("DATABASE_URL")
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+enum ReminderRecurrence {
+  ONCE
+  DAILY
+  WEEKLY
+  MONTHLY
+  YEARLY
+  CUSTOM
+}
+enum ReminderStatus {
+  PENDING
+  TRIGGERED
+  COMPLETED
+  DISMISSED
+  CANCELLED
+}
+enum TaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+enum RequestType {
+  GENERAL
+  APPROVAL
+  DECISION
+  DOCUMENT_REVIEW
+  INFORMATION
+  MEETING
+  EXPENSE
+  OTHER
+}
+enum RequestStatus {
+  PENDING
+  IN_REVIEW
+  APPROVED
+  REJECTED
+  NEEDS_INFORMATION
+  COMPLETED
+  CANCELLED
+}
+enum MeetingType {
+  IN_PERSON
+  ONLINE
+  PHONE
+  HYBRID
+}
+enum MeetingStatus {
+  SCHEDULED
+  RESCHEDULED
+  COMPLETED
+  CANCELLED
+}
+enum NotificationType {
+  TASK_ASSIGNED
+  TASK_DUE
+  TASK_OVERDUE
+  REMINDER
+  REQUEST
+  MEETING
+  COMMENT
+  SYSTEM
+}
+
+model User {
+  id String @id @default(cuid())
+  title String?
+  firstName String
+  middleName String?
+  lastName String
+  email String @unique
+  passwordHash String
+  role String @default("EMPLOYEE")
+  isActive Boolean @default(true)
+  department String?
+  avatarUrl String?
+  roleRef Role? @relation(fields: [roleId], references: [id])
+  roleId String?
+  tasksAssigned Task[] @relation("TaskAssignee")
+  taskParticipants TaskParticipant[]
+  tasksCreated Task[] @relation("TaskCreator")
+  remindersReceived Reminder[] @relation("ReminderRecipient")
+  reminderParticipants ReminderParticipant[]
+  remindersCreated Reminder[] @relation("ReminderCreator")
+  requestsMade Request[] @relation("RequestRequester")
+  requestsAssigned Request[] @relation("RequestAssignee")
+  meetingsOrganized Meeting[] @relation("MeetingOrganizer")
+  meetings MeetingParticipant[]
+  notifications Notification[]
+  approvals ApprovalRequest[] @relation("ApprovalApprover")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+model Role {
+  id String @id @default(cuid())
+  name String @unique
+  description String?
+  isActive Boolean @default(true)
+  users User[]
+  permissions RolePermission[]
+}
+model Permission {
+  id String @id @default(cuid())
+  key String @unique
+  action String
+  resource String
+  roles RolePermission[]
+  @@unique([action, resource])
+}
+model RolePermission {
+  roleId String
+  permissionId String
+  role Role @relation(fields:[roleId],references:[id],onDelete:Cascade)
+  permission Permission @relation(fields:[permissionId],references:[id],onDelete:Cascade)
+  @@id([roleId,permissionId])
+}
+model Task {
+  id String @id @default(cuid())
+  title String
+  description String?
+  assignedToId String
+  createdById String
+  priority Priority
+  category String
+  dueDate DateTime
+  dueTime String?
+  status TaskStatus @default(PENDING)
+  assignedTo User @relation("TaskAssignee",fields:[assignedToId],references:[id])
+  createdBy User @relation("TaskCreator",fields:[createdById],references:[id])
+  participants TaskParticipant[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+model Reminder {
+  id String @id @default(cuid())
+  title String
+  description String?
+  recipientId String
+  createdById String
+  priority Priority
+  category String
+  reminderDate DateTime
+  reminderTime String
+  recurrence ReminderRecurrence
+  status ReminderStatus @default(PENDING)
+  recipient User @relation("ReminderRecipient",fields:[recipientId],references:[id])
+  createdBy User @relation("ReminderCreator",fields:[createdById],references:[id])
+  participants ReminderParticipant[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+model Request {
+  id String @id @default(cuid())
+  title String
+  description String?
+  type RequestType
+  priority Priority
+  requesterId String
+  assignedToId String
+  status RequestStatus @default(PENDING)
+  dueDate DateTime?
+  requester User @relation("RequestRequester",fields:[requesterId],references:[id])
+  assignedTo User @relation("RequestAssignee",fields:[assignedToId],references:[id])
+  approval ApprovalRequest?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+model TaskParticipant {
+  taskId String
+  userId String
+  task Task @relation(fields:[taskId],references:[id],onDelete:Cascade)
+  user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+  @@id([taskId,userId])
+}
+model ReminderParticipant {
+  reminderId String
+  userId String
+  reminder Reminder @relation(fields:[reminderId],references:[id],onDelete:Cascade)
+  user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+  @@id([reminderId,userId])
+}
+model ApprovalRequest {
+  id String @id @default(cuid())
+  requestId String @unique
+  approverId String
+  status RequestStatus @default(PENDING)
+  request Request @relation(fields:[requestId],references:[id],onDelete:Cascade)
+  approver User @relation("ApprovalApprover",fields:[approverId],references:[id])
+}
+model Meeting {
+  id String @id @default(cuid())
+  title String
+  description String?
+  agenda String?
+  organizerId String
+  meetingDate DateTime
+  startTime String
+  endTime String
+  location String?
+  meetingType MeetingType
+  status MeetingStatus @default(SCHEDULED)
+  organizer User @relation("MeetingOrganizer",fields:[organizerId],references:[id])
+  participants MeetingParticipant[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+model MeetingParticipant {
+  meetingId String
+  userId String
+  meeting Meeting @relation(fields:[meetingId],references:[id],onDelete:Cascade)
+  user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+  @@id([meetingId,userId])
+}
+model Notification {
+  id String @id @default(cuid())
+  userId String
+  title String
+  message String
+  type NotificationType
+  priority Priority
+  isRead Boolean @default(false)
+  sourceId String?
+  referenceId String?
+  resourceType String?
+  route String?
+  user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+  createdAt DateTime @default(now())
+}
+

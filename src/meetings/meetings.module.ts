@@ -1,0 +1,1 @@
+import {Module} from '@nestjs/common'; import {PrismaService} from '../prisma.service'; import {MeetingsController} from './meetings.controller'; import {MeetingsService} from './meetings.service'; @Module({controllers:[MeetingsController],providers:[MeetingsService,PrismaService]}) export class MeetingsModule{}
