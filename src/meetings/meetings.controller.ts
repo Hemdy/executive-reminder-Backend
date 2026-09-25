@@ -21,6 +21,10 @@ class UpdateMeetingDto extends MeetingDto {
   @IsEnum(MeetingStatus) status!: MeetingStatus;
 }
 
+class MeetingStatusDto {
+  @IsEnum(MeetingStatus) status!: MeetingStatus;
+}
+
 @Controller('meetings')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 export class MeetingsController {
@@ -29,6 +33,6 @@ export class MeetingsController {
   @Post() @Permissions('meetings:write') create(@Body() dto: MeetingDto, @Req() req: any) { return this.service.create(dto, req.user.id); }
   @Get(':id') get(@Param('id') id: string) { return this.service.get(id); }
   @Patch(':id') @Permissions('meetings:write') update(@Param('id') id: string, @Body() dto: UpdateMeetingDto) { return this.service.update(id, dto); }
-  @Patch(':id/status') @Permissions('meetings:write') status(@Param('id') id: string, @Body('status') status: string) { return this.service.status(id, status); }
+  @Patch(':id/status') @Permissions('meetings:write') status(@Param('id') id: string, @Body() dto: MeetingStatusDto) { return this.service.status(id, dto.status); }
   @Delete(':id') @Permissions('meetings:write') remove(@Param('id') id: string) { return this.service.remove(id); }
 }

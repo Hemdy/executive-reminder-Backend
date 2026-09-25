@@ -2,8 +2,9 @@ generator client {
   provider = "prisma-client-js"
 }
 datasource db {
-  provider = "sqlite"
+  provider  = "postgresql"
   url = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 enum Priority {
@@ -239,4 +240,3 @@ model Notification {
   user User @relation(fields:[userId],references:[id],onDelete:Cascade)
   createdAt DateTime @default(now())
 }
-

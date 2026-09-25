@@ -1,17 +1,17 @@
 import { PrismaClient } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import { createInitialAdmin } from './create-admin';
+import { seededPermissions } from './permissions';
 
-const db = new PrismaClient();
-const permissions = [
-  ['read', 'tasks'], ['write', 'tasks'], ['read', 'reminders'], ['write', 'reminders'],
-  ['read', 'requests'], ['write', 'requests'], ['read', 'meetings'], ['write', 'meetings'],
-  ['read', 'notifications'], ['write', 'notifications'], ['users', 'admin'],
-  ['view', 'roles'], ['create', 'roles'], ['edit', 'roles'], ['delete', 'roles'],
-  ['view', 'users'], ['create', 'users'], ['edit', 'users'], ['delete', 'users'],
-  ['view', 'dashboard'], ['view', 'settings'], ['edit', 'settings'],
-] as const;
+const databaseUrl = process.env.DIRECT_URL ?? process.env.DATABASE_URL;
+const db = new PrismaClient(databaseUrl ? { datasources: { db: { url: databaseUrl } } } : {});
 
 async function seed() {
+  if (process.argv.includes('--create-admin')) {
+    await createInitialAdmin(db, process.env.ADMIN_PASSWORD ?? '');
+    return;
+  }
+
   // Clear records that reference users before removing users and their roles.
   // This makes the seed safe to run against an existing database with foreign keys enabled.
   await db.$transaction([
@@ -27,7 +27,7 @@ async function seed() {
     db.role.deleteMany(),
   ]);
 
-  const records = await Promise.all(permissions.map(([action, resource]) => db.permission.upsert({
+  const records = await Promise.all(seededPermissions.map(([action, resource]) => db.permission.upsert({
     where: { action_resource: { action, resource } },
     update: { key: `${resource}:${action}` },
     create: { key: `${resource}:${action}`, action, resource },

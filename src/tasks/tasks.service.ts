@@ -20,5 +20,5 @@ import { PrismaService } from '../prisma.service';
   return this.db.task.update({ where: { id }, data: { ...taskData, dueDate: new Date(dto.dueDate), ...(participantIds ? { participants: { create: [...new Set<string>(participantIds)].map(userId => ({ userId })) } } : {}) }, include: this.taskInclude });
  }
  remove(id: string) { return this.db.task.delete({ where: { id } }); }
- status(id: string, status: any) { return this.db.task.update({ where: { id }, data: { status } }); }
+ status(id: string, status: any) { return this.db.task.update({ where: { id }, data: { status }, include: this.taskInclude }); }
 }
