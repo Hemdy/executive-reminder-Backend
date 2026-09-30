@@ -14,7 +14,7 @@ async function createApp(): Promise<express.Express> {
 
   app.setGlobalPrefix('api');
   app.enableCors({
-    origin: process.env.FRONTEND_ORIGIN ?? 'http://localhost:4200',
+    origin: process.env.FRONTEND_ORIGIN ?? 'https://executive-reminder-frontend.vercel.app/login',
     credentials: true,
   });
   app.useGlobalPipes(new ValidationPipe({
