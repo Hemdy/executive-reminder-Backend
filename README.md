@@ -40,8 +40,18 @@ DTOs reject unknown fields.
 Roles accept arbitrary `name`, optional `description`, and permissions as
 `{ "action": "read", "resource": "tasks" }`; permission authorization consistently
 uses the `resource:action` identifier (for example `tasks:read`).
-The initial PostgreSQL schema migration is checked in under `prisma/migrations`.
+PostgreSQL schema migrations are checked in under `prisma/migrations`, including
+the task comments and attachment tables.
 The Vercel-compatible function entry point is `api/index.ts`.
+
+Tasks support comments at `GET/POST /tasks/:id/comments` and file metadata at
+`GET /tasks/:id/attachments`. Upload with multipart field `file` to
+`POST /tasks/:id/attachments` and download an attachment from
+`GET /tasks/:id/attachments/:attachmentId`. Attachments are stored in
+PostgreSQL, are limited to 4 MB each, and accept PDF, image, and common office
+document formats. Apply pending migrations with `npm run prisma:migrate:deploy`
+before using these endpoints. Task assignees can start pending tasks and
+complete in-progress tasks; users with `tasks:write` retain management access.
 
 ### Vercel deployment
 
