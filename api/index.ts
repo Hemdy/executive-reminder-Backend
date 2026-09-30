@@ -13,10 +13,13 @@ async function createApp(): Promise<express.Express> {
   const app = await NestFactory.create(AppModule, new ExpressAdapter(server));
 
   app.setGlobalPrefix('api');
-  app.enableCors({
-    origin:'https://executive-reminder-frontend.vercel.app',
-    credentials: true,
-  });
+app.enableCors({
+  origin:
+    process.env.FRONTEND_ORIGIN ??
+    "https://executive-reminder-frontend.vercel.app",
+  credentials: true,
+});
+
   app.useGlobalPipes(new ValidationPipe({
     whitelist: true,
     transform: true,
