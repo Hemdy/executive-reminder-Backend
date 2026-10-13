@@ -47,11 +47,20 @@ The Vercel-compatible function entry point is `api/index.ts`.
 Tasks support comments at `GET/POST /tasks/:id/comments` and file metadata at
 `GET /tasks/:id/attachments`. Upload with multipart field `file` to
 `POST /tasks/:id/attachments` and download an attachment from
-`GET /tasks/:id/attachments/:attachmentId`. Attachments are stored in
-PostgreSQL, are limited to 4 MB each, and accept PDF, image, and common office
-document formats. Apply pending migrations with `npm run prisma:migrate:deploy`
-before using these endpoints. Task assignees can start pending tasks and
-complete in-progress tasks; users with `tasks:write` retain management access.
+`GET /tasks/:id/attachments/:attachmentId`. Attachments are limited to 4 MB and
+only PDF, DOC, and DOCX files are accepted. File bytes are stored in a private
+Supabase Storage bucket; PostgreSQL stores attachment metadata and the object
+path. Set `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and optionally
+`SUPABASE_STORAGE_BUCKET` in the backend environment, and create the bucket
+privately in Supabase Storage. In non-production local development, if these
+Supabase values are omitted, files are stored under the ignored
+`.task-attachments` directory and are still served only by the authenticated
+download endpoint. Never put the service-role key in frontend configuration.
+Existing attachment records from the earlier database-storage implementation
+retain their bytes and remain downloadable; new files use object storage.
+Apply pending migrations with `npm run prisma:migrate:deploy` before using these
+endpoints. Task assignees can start pending tasks and complete in-progress
+tasks; users with `tasks:write` retain management access.
 
 ### Vercel deployment
 
@@ -66,6 +75,11 @@ Preview, and Development environments as appropriate:
 - `JWT_SECRET`: a long, random secret used to sign access tokens.
 - `JWT_EXPIRES_IN`: optional token lifetime such as `1d`.
 - `FRONTEND_ORIGIN`: the deployed frontend origin, including its scheme.
+- `SUPABASE_URL`: the Supabase project URL used for private file storage.
+- `SUPABASE_SERVICE_ROLE_KEY`: a backend-only service-role key for private
+  Storage access; never expose it to the frontend.
+- `SUPABASE_STORAGE_BUCKET`: optional private bucket name (defaults to
+  `task-attachments`).
 
 Copy the connection strings from Supabase Dashboard → Connect. The Supabase
 project URL and publishable key you provided are not used by this Prisma

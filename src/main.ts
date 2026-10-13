@@ -5,12 +5,23 @@ import { AppModule } from "./app.module";
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.setGlobalPrefix("api");
+  // app.enableCors({
+  //   origin:
+  //     process.env.FRONTEND_ORIGIN ??
+  //     "https://executive-reminder-frontend.vercel.app",
+  //   credentials: true,
+  // });
+
   app.enableCors({
-    origin:
-      process.env.FRONTEND_ORIGIN ??
-      "https://executive-reminder-frontend.vercel.app",
-    credentials: true,
-  });
+  origin: [
+    'https://executive-reminder-frontend.vercel.app',
+    'http://localhost:4200',
+  ],
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+  optionsSuccessStatus: 204,
+});
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,

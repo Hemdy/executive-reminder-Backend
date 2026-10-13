@@ -1,17 +1,32 @@
 import {
+  BadGatewayException,
   BadRequestException,
   ForbiddenException,
   Injectable,
   NotFoundException
 } from '@nestjs/common';
 import { TaskStatus } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
+import { extname } from 'node:path';
 import { PrismaService } from '../prisma.service';
+import { TaskAttachmentStorageService } from './task-attachment-storage.service';
 
 const MAX_ATTACHMENT_SIZE = 4 * 1024 * 1024;
+const ATTACHMENT_TYPES = new Map([
+  ['.pdf', { mimeType: 'application/pdf', signature: Buffer.from('%PDF-') }],
+  ['.doc', { mimeType: 'application/msword', signature: Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]) }],
+  ['.docx', {
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    signature: Buffer.from('PK')
+  }]
+]);
 
 @Injectable()
 export class TasksService {
-  constructor(private readonly db: PrismaService) {}
+  constructor(
+    private readonly db: PrismaService,
+    private readonly attachmentStorage: TaskAttachmentStorageService
+  ) {}
 
   private readonly userSelect = {
     id: true,
@@ -34,15 +49,10 @@ export class TasksService {
     _count: { select: { comments: true, attachments: true } }
   } as const;
 
-  list(userId: string) {
+  async list(userId: string) {
+    const canViewAllTasks = await this.hasBroadTaskAccess(userId);
     return this.db.task.findMany({
-      where: {
-        OR: [
-          { assignedToId: userId },
-          { createdById: userId },
-          { participants: { some: { userId } } }
-        ]
-      },
+      where: canViewAllTasks ? undefined : { assignedToId: userId },
       include: this.taskInclude,
       orderBy: { dueDate: 'asc' }
     });
@@ -80,13 +90,20 @@ export class TasksService {
     return task;
   }
 
-  async get(id: string) {
+  async get(id: string, userId: string) {
     const item = await this.db.task.findUnique({
       where: { id },
       include: this.taskInclude
     });
     if (!item) {
       throw new NotFoundException('Task not found');
+    }
+    const isTaskMember =
+      item.assignedToId === userId ||
+      item.createdById === userId ||
+      item.participants.some(participant => participant.userId === userId);
+    if (!isTaskMember && !(await this.hasBroadTaskAccess(userId))) {
+      throw new ForbiddenException('You are not allowed to access this task');
     }
     return item;
   }
@@ -214,38 +231,91 @@ export class TasksService {
       throw new BadRequestException('Attachment filename is invalid');
     }
 
-    return this.db.taskAttachment.create({
-      data: {
-        taskId,
-        uploaderId: userId,
-        fileName,
-        mimeType: file.mimetype,
-        size: file.size,
-        content: Uint8Array.from(file.buffer)
-      },
-      select: {
-        id: true,
-        fileName: true,
-        mimeType: true,
-        size: true,
-        createdAt: true,
-        uploader: {
-          select: { id: true, firstName: true, lastName: true }
+    const extension = extname(fileName).toLowerCase();
+    const fileType = ATTACHMENT_TYPES.get(extension);
+    if (
+      !fileType ||
+      (file.mimetype !== fileType.mimeType && file.mimetype !== 'application/octet-stream')
+    ) {
+      throw new BadRequestException('Only valid PDF and Word documents are supported');
+    }
+    if (!this.hasValidFileSignature(extension, file.buffer)) {
+      throw new BadRequestException('The uploaded file content does not match its file type');
+    }
+
+    const storagePath = `${taskId}/${randomUUID()}${extension}`;
+    await this.attachmentStorage.upload(storagePath, file.buffer, fileType.mimeType);
+    try {
+      return await this.db.taskAttachment.create({
+        data: {
+          taskId,
+          uploaderId: userId,
+          fileName,
+          mimeType: fileType.mimeType,
+          size: file.size,
+          storagePath
+        },
+        select: {
+          id: true,
+          fileName: true,
+          mimeType: true,
+          size: true,
+          createdAt: true,
+          uploader: {
+            select: { id: true, firstName: true, lastName: true }
+          }
         }
+      });
+    } catch (error) {
+      try {
+        await this.attachmentStorage.remove(storagePath);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          'Unable to save attachment metadata or clean up its stored object'
+        );
       }
-    });
+      throw error;
+    }
   }
 
   async getAttachment(taskId: string, attachmentId: string, userId: string) {
     await this.ensureTaskAccess(taskId, userId);
     const attachment = await this.db.taskAttachment.findFirst({
       where: { id: attachmentId, taskId },
-      select: { fileName: true, mimeType: true, size: true, content: true }
+      select: {
+        fileName: true,
+        mimeType: true,
+        size: true,
+        storagePath: true,
+        legacyContent: true
+      }
     });
     if (!attachment) {
       throw new NotFoundException('Task attachment not found');
     }
-    return attachment;
+    if (attachment.storagePath) {
+      return {
+        ...attachment,
+        content: await this.attachmentStorage.download(attachment.storagePath)
+      };
+    }
+    if (attachment.legacyContent) {
+      return { ...attachment, content: Buffer.from(attachment.legacyContent) };
+    }
+    throw new BadGatewayException('Task attachment is missing its stored file');
+  }
+
+  private hasValidFileSignature(extension: string, content: Buffer): boolean {
+    const type = ATTACHMENT_TYPES.get(extension);
+    if (!type || !content.subarray(0, type.signature.length).equals(type.signature)) {
+      return false;
+    }
+    if (extension !== '.docx') {
+      return true;
+    }
+    const archiveNames = content.toString('latin1');
+    return archiveNames.includes('[Content_Types].xml') && archiveNames.includes('word/document.xml');
   }
 
   private async ensureTaskAccess(taskId: string, userId: string): Promise<void> {
@@ -265,36 +335,51 @@ export class TasksService {
       task.assignedToId === userId ||
       task.createdById === userId ||
       task.participants.some(participant => participant.userId === userId);
-    if (!isTaskMember && !(await this.hasTaskWritePermission(userId))) {
+    if (!isTaskMember && !(await this.hasBroadTaskAccess(userId))) {
       throw new ForbiddenException('You are not allowed to access this task');
     }
   }
 
+  private async hasBroadTaskAccess(userId: string): Promise<boolean> {
+    return this.hasTaskPermission(userId, ['read', 'write']);
+  }
+
   private async hasTaskWritePermission(userId: string): Promise<boolean> {
+    return this.hasTaskPermission(userId, ['write']);
+  }
+
+  private async hasTaskPermission(userId: string, actions: readonly string[]): Promise<boolean> {
     const user = await this.db.user.findUnique({
       where: { id: userId },
       select: {
         isActive: true,
-        roleRef: {
-          select: {
-            isActive: true,
-            permissions: {
-              select: {
-                permission: {
-                  select: { resource: true, action: true }
-                }
-              }
-            }
-          }
-        }
+        role: true,
+        roleRef: { select: this.taskRoleSelect }
       }
     });
+    if (!user?.isActive) {
+      return false;
+    }
+    const role = user.roleRef ?? await this.db.role.findUnique({
+      where: { name: user.role },
+      select: this.taskRoleSelect
+    });
     return Boolean(
-      user?.isActive &&
-      user.roleRef?.isActive &&
-      user.roleRef.permissions.some(
-        ({ permission }) => permission.resource === 'tasks' && permission.action === 'write'
+      role?.isActive &&
+      role.permissions.some(({ permission }) =>
+        permission.resource === 'tasks' && actions.includes(permission.action)
       )
     );
   }
+
+  private readonly taskRoleSelect = {
+    isActive: true,
+    permissions: {
+      select: {
+        permission: {
+          select: { resource: true, action: true }
+        }
+      }
+    }
+  } as const;
 }

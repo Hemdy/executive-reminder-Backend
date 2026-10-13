@@ -14,27 +14,17 @@ import {
   UseInterceptors
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { extname } from 'node:path';
 import type { Response } from 'express';
 import { Permissions } from '../common/decorators';
 import { JwtAuthGuard, PermissionsGuard } from '../common/guards';
 import { TaskCommentDto, TaskDto, TaskStatusDto, UpdateTaskDto } from './task.dto';
 import { TasksService } from './tasks.service';
 
-const allowedAttachmentTypes = new Set([
-  'application/pdf',
-  'image/gif',
-  'image/jpeg',
-  'image/png',
-  'image/webp',
-  'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'application/vnd.ms-excel',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'application/vnd.ms-powerpoint',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  'application/vnd.oasis.opendocument.text',
-  'application/rtf',
-  'text/plain'
+const allowedAttachmentTypes = new Map([
+  ['.pdf', 'application/pdf'],
+  ['.doc', 'application/msword'],
+  ['.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document']
 ]);
 
 interface UploadedTaskFile {
@@ -50,7 +40,6 @@ export class TasksController {
   constructor(private readonly service: TasksService) {}
 
   @Get()
-  @Permissions('tasks:read')
   list(@Req() req: any) {
     return this.service.list(req.user.id);
   }
@@ -62,8 +51,8 @@ export class TasksController {
   }
 
   @Get(':id')
-  get(@Param('id') id: string) {
-    return this.service.get(id);
+  get(@Param('id') id: string, @Req() req: any) {
+    return this.service.get(id, req.user.id);
   }
 
   @Patch(':id')
@@ -96,8 +85,13 @@ export class TasksController {
   @UseInterceptors(FileInterceptor('file', {
     limits: { fileSize: 4 * 1024 * 1024 },
     fileFilter: (_request, file, callback) => {
-      if (!allowedAttachmentTypes.has(file.mimetype)) {
-        callback(new BadRequestException('Unsupported file type'), false);
+      const extension = extname(file.originalname).toLowerCase();
+      const expectedMimeType = allowedAttachmentTypes.get(extension);
+      if (
+        !expectedMimeType ||
+        (file.mimetype !== expectedMimeType && file.mimetype !== 'application/octet-stream')
+      ) {
+        callback(new BadRequestException('Only PDF and Word documents are supported'), false);
         return;
       }
       callback(null, true);
@@ -132,7 +126,7 @@ export class TasksController {
     response.setHeader('Content-Type', attachment.mimeType);
     response.setHeader('Content-Length', attachment.size);
     response.setHeader('X-Content-Type-Options', 'nosniff');
-    response.send(Buffer.from(attachment.content));
+    response.send(attachment.content);
   }
 
   @Delete(':id')
