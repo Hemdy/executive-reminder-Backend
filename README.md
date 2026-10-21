@@ -44,6 +44,31 @@ PostgreSQL schema migrations are checked in under `prisma/migrations`, including
 the task comments and attachment tables.
 The Vercel-compatible function entry point is `api/index.ts`.
 
+### Push notifications
+
+The backend sends standards-based Web Push notifications through VAPID. Generate
+a key pair from this folder with `npx web-push generate-vapid-keys` and set
+`VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and `VAPID_SUBJECT` in the backend
+environment. Set `CRON_SECRET` to a separate long random value; Vercel Cron
+uses it to authorize `GET /api/notifications/push/dispatch`. Configure
+`REMINDER_TIMEZONE` to an IANA timezone (currently `Africa/Lagos`) for reminder
+due-time calculations.
+
+Apply the new Supabase migration with `npm run prisma:migrate:deploy` before
+deploying the API. The migration adds per-user browser push subscriptions,
+idempotent notification event keys, a push delivery queue, and meeting comments.
+Vercel Cron checks due reminders and pending Web Push deliveries every minute.
+The once-per-minute schedule requires a Vercel plan that supports minute-level
+Cron jobs; verify the plan limit before deployment.
+Only the authenticated user can register or remove their own push subscription.
+Task and meeting comments notify the other members of the task or meeting.
+
+Push notifications require HTTPS and an installed/accepted PWA on supported
+browsers. On iOS, Web Push is available to web apps added to the Home Screen
+with iOS/iPadOS 16.4 or later. The user must enable notifications from the
+Notifications page after signing in. Without VAPID keys, push subscription is
+reported as unavailable; in-app notifications continue to work.
+
 Tasks support comments at `GET/POST /tasks/:id/comments` and file metadata at
 `GET /tasks/:id/attachments`. Upload with multipart field `file` to
 `POST /tasks/:id/attachments` and download an attachment from

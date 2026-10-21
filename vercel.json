@@ -1,6 +1,12 @@
 {
   "version": 2,
   "buildCommand": "npm run build",
+  "crons": [
+    {
+      "path": "/api/notifications/push/dispatch",
+      "schedule": "* * * * *"
+    }
+  ],
   "rewrites": [
     {
       "source": "/(.*)",
@@ -8,4 +14,3 @@
     }
   ]
 }
-

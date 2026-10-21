@@ -38,6 +38,9 @@ model User {
   roleRef              Role?                 @relation(fields: [roleId], references: [id])
   taskComments         TaskComment[]
   taskAttachments      TaskAttachment[]
+  meetingComments      MeetingComment[]
+  pushSubscriptions    PushSubscription[]
+  notificationEvents  NotificationEvent[]
 }
 
 model Role {
@@ -199,6 +202,7 @@ model Meeting {
   updatedAt    DateTime             @updatedAt
   organizer    User                 @relation("MeetingOrganizer", fields: [organizerId], references: [id])
   participants MeetingParticipant[]
+  comments     MeetingComment[]
 }
 
 model MeetingParticipant {
@@ -208,6 +212,43 @@ model MeetingParticipant {
   user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@id([meetingId, userId])
+}
+
+model MeetingComment {
+  id        String   @id @default(cuid())
+  meetingId String
+  authorId  String
+  body      String
+  createdAt DateTime @default(now())
+  meeting   Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Restrict)
+
+  @@index([meetingId, createdAt])
+}
+
+model PushSubscription {
+  id             String   @id @default(cuid())
+  userId         String
+  endpoint       String   @unique
+  p256dh         String
+  auth           String
+  expirationTime BigInt?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model NotificationEvent {
+  id        String   @id @default(cuid())
+  userId    String
+  eventKey  String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, eventKey])
+  @@index([createdAt])
 }
 
 model Notification {
@@ -223,7 +264,14 @@ model Notification {
   resourceType String?
   route        String?
   createdAt    DateTime         @default(now())
+  eventKey     String?
+  pushClaimedAt DateTime?
+  pushSentAt   DateTime?
+  pushAttempts Int              @default(0)
   user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, eventKey])
+  @@index([pushSentAt, pushClaimedAt])
 }
 
 enum Priority {

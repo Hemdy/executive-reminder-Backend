@@ -9,6 +9,7 @@ import { TaskStatus } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { extname } from 'node:path';
 import { PrismaService } from '../prisma.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { TaskAttachmentStorageService } from './task-attachment-storage.service';
 
 const MAX_ATTACHMENT_SIZE = 4 * 1024 * 1024;
@@ -25,7 +26,8 @@ const ATTACHMENT_TYPES = new Map([
 export class TasksService {
   constructor(
     private readonly db: PrismaService,
-    private readonly attachmentStorage: TaskAttachmentStorageService
+    private readonly attachmentStorage: TaskAttachmentStorageService,
+    private readonly notifications: NotificationsService
   ) {}
 
   private readonly userSelect = {
@@ -60,7 +62,7 @@ export class TasksService {
 
   async create(dto: any, userId: string) {
     const { participantIds, ...taskData } = dto;
-    const recipients = [...new Set<string>(participantIds?.length ? participantIds : [dto.assignedToId])];
+    const recipients = [...new Set<string>([dto.assignedToId, ...(participantIds ?? [])])];
     const task = await this.db.task.create({
       data: {
         ...taskData,
@@ -74,19 +76,20 @@ export class TasksService {
       where: { id: userId },
       select: { firstName: true, lastName: true }
     });
-    await this.db.notification.createMany({
-      data: recipients.map(recipientId => ({
-        userId: recipientId,
+    await this.notifications.createForUsers(
+      {
         title: 'New task assigned',
         message: `${creator?.firstName ?? 'A user'} ${creator?.lastName ?? ''} assigned you "${task.title}".${task.description ? ` ${task.description}` : ''}`,
-        type: 'TASK_ASSIGNED' as const,
+        type: 'TASK_ASSIGNED',
         priority: task.priority,
         sourceId: task.id,
         referenceId: task.id,
         resourceType: 'task',
         route: `/tasks/${task.id}`
-      }))
-    });
+      },
+      recipients,
+      `task_assigned:${task.id}:${task.updatedAt.toISOString()}`,
+    );
     return task;
   }
 
@@ -110,10 +113,14 @@ export class TasksService {
 
   async update(id: string, dto: any) {
     const { participantIds, ...taskData } = dto;
+    const existing = await this.db.task.findUniqueOrThrow({
+      where: { id },
+      select: { assignedToId: true }
+    });
     if (participantIds) {
       await this.db.taskParticipant.deleteMany({ where: { taskId: id } });
     }
-    return this.db.task.update({
+    const task = await this.db.task.update({
       where: { id },
       data: {
         ...taskData,
@@ -128,6 +135,23 @@ export class TasksService {
       },
       include: this.taskInclude
     });
+    if (task.assignedToId !== existing.assignedToId) {
+      await this.notifications.createForUsers(
+        {
+          title: 'New task assigned',
+          message: `${task.createdBy.firstName} ${task.createdBy.lastName} assigned you "${task.title}".${task.description ? ` ${task.description}` : ''}`,
+          type: 'TASK_ASSIGNED',
+          priority: task.priority,
+          sourceId: task.id,
+          referenceId: task.id,
+          resourceType: 'task',
+          route: `/tasks/${task.id}`
+        },
+        [task.assignedToId],
+        `task_assigned:${task.id}:${task.updatedAt.toISOString()}`
+      );
+    }
+    return task;
   }
 
   remove(id: string) {
@@ -181,7 +205,7 @@ export class TasksService {
     if (!trimmedBody) {
       throw new BadRequestException('Comment cannot be empty');
     }
-    return this.db.taskComment.create({
+    const comment = await this.db.taskComment.create({
       data: { taskId, authorId: userId, body: trimmedBody },
       select: {
         id: true,
@@ -192,6 +216,35 @@ export class TasksService {
         }
       }
     });
+    const task = await this.db.task.findUniqueOrThrow({
+      where: { id: taskId },
+      select: {
+        title: true,
+        assignedToId: true,
+        createdById: true,
+        participants: { select: { userId: true } }
+      }
+    });
+    const recipients = [
+      task.assignedToId,
+      task.createdById,
+      ...task.participants.map(participant => participant.userId)
+    ].filter(recipientId => recipientId !== userId);
+    await this.notifications.createForUsers(
+      {
+        title: 'New task comment',
+        message: `${comment.author.firstName} ${comment.author.lastName} commented on "${task.title}".`,
+        type: 'COMMENT',
+        priority: 'MEDIUM',
+        sourceId: taskId,
+        referenceId: taskId,
+        resourceType: 'task',
+        route: `/tasks/${taskId}?comment=${comment.id}`
+      },
+      recipients,
+      `task_comment:${comment.id}`,
+    );
+    return comment;
   }
 
   async listAttachments(taskId: string, userId: string) {
