@@ -25,8 +25,11 @@ model User {
   updatedAt            DateTime              @updatedAt
   approvals            ApprovalRequest[]     @relation("ApprovalApprover")
   meetingsOrganized    Meeting[]             @relation("MeetingOrganizer")
+  meetingComments      MeetingComment[]
   meetings             MeetingParticipant[]
   notifications        Notification[]
+  notificationEvents   NotificationEvent[]
+  pushSubscriptions    PushSubscription[]
   remindersCreated     Reminder[]            @relation("ReminderCreator")
   remindersReceived    Reminder[]            @relation("ReminderRecipient")
   reminderParticipants ReminderParticipant[]
@@ -34,13 +37,10 @@ model User {
   requestsMade         Request[]             @relation("RequestRequester")
   tasksAssigned        Task[]                @relation("TaskAssignee")
   tasksCreated         Task[]                @relation("TaskCreator")
+  taskAttachments      TaskAttachment[]
+  taskComments         TaskComment[]
   taskParticipants     TaskParticipant[]
   roleRef              Role?                 @relation(fields: [roleId], references: [id])
-  taskComments         TaskComment[]
-  taskAttachments      TaskAttachment[]
-  meetingComments      MeetingComment[]
-  pushSubscriptions    PushSubscription[]
-  notificationEvents  NotificationEvent[]
 }
 
 model Role {
@@ -86,9 +86,9 @@ model Task {
   updatedAt    DateTime          @updatedAt
   assignedTo   User              @relation("TaskAssignee", fields: [assignedToId], references: [id])
   createdBy    User              @relation("TaskCreator", fields: [createdById], references: [id])
-  participants TaskParticipant[]
-  comments     TaskComment[]
   attachments  TaskAttachment[]
+  comments     TaskComment[]
+  participants TaskParticipant[]
 }
 
 model TaskComment {
@@ -98,9 +98,8 @@ model TaskComment {
   body      String   @map("content")
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
-
-  task   Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  author User @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  author    User     @relation(fields: [authorId], references: [id])
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
 
   @@index([taskId, createdAt])
 }
@@ -112,14 +111,12 @@ model TaskAttachment {
   fileName      String
   mimeType      String
   size          Int
-  storagePath   String?
+  storagePath   String?  @unique
   legacyContent Bytes?   @map("content")
   createdAt     DateTime @default(now())
+  task          Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  uploader      User     @relation(fields: [uploaderId], references: [id])
 
-  task     Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  uploader User @relation(fields: [uploaderId], references: [id], onDelete: Restrict)
-
-  @@unique([storagePath])
   @@index([taskId, createdAt])
 }
 
@@ -201,8 +198,8 @@ model Meeting {
   createdAt    DateTime             @default(now())
   updatedAt    DateTime             @updatedAt
   organizer    User                 @relation("MeetingOrganizer", fields: [organizerId], references: [id])
-  participants MeetingParticipant[]
   comments     MeetingComment[]
+  participants MeetingParticipant[]
 }
 
 model MeetingParticipant {
@@ -220,8 +217,8 @@ model MeetingComment {
   authorId  String
   body      String
   createdAt DateTime @default(now())
+  author    User     @relation(fields: [authorId], references: [id])
   meeting   Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
-  author    User     @relation(fields: [authorId], references: [id], onDelete: Restrict)
 
   @@index([meetingId, createdAt])
 }
@@ -252,23 +249,23 @@ model NotificationEvent {
 }
 
 model Notification {
-  id           String           @id @default(cuid())
-  userId       String
-  title        String
-  message      String
-  type         NotificationType
-  priority     Priority
-  isRead       Boolean          @default(false)
-  sourceId     String?
-  referenceId  String?
-  resourceType String?
-  route        String?
-  createdAt    DateTime         @default(now())
-  eventKey     String?
+  id            String           @id @default(cuid())
+  userId        String
+  title         String
+  message       String
+  type          NotificationType
+  priority      Priority
+  isRead        Boolean          @default(false)
+  sourceId      String?
+  referenceId   String?
+  resourceType  String?
+  route         String?
+  createdAt     DateTime         @default(now())
+  eventKey      String?
   pushClaimedAt DateTime?
-  pushSentAt   DateTime?
-  pushAttempts Int              @default(0)
-  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pushSentAt    DateTime?
+  pushAttempts  Int              @default(0)
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, eventKey])
   @@index([pushSentAt, pushClaimedAt])
