@@ -26,6 +26,7 @@ model User {
   approvals            ApprovalRequest[]     @relation("ApprovalApprover")
   meetingsOrganized    Meeting[]             @relation("MeetingOrganizer")
   meetingComments      MeetingComment[]
+  meetingAttachments   MeetingAttachment[]
   meetings             MeetingParticipant[]
   notifications        Notification[]
   notificationEvents   NotificationEvent[]
@@ -33,8 +34,12 @@ model User {
   remindersCreated     Reminder[]            @relation("ReminderCreator")
   remindersReceived    Reminder[]            @relation("ReminderRecipient")
   reminderParticipants ReminderParticipant[]
+  reminderComments     ReminderComment[]
+  reminderAttachments  ReminderAttachment[]
   requestsAssigned     Request[]             @relation("RequestAssignee")
   requestsMade         Request[]             @relation("RequestRequester")
+  requestComments      RequestComment[]
+  requestAttachments   RequestAttachment[]
   tasksAssigned        Task[]                @relation("TaskAssignee")
   tasksCreated         Task[]                @relation("TaskCreator")
   taskAttachments      TaskAttachment[]
@@ -137,6 +142,37 @@ model Reminder {
   createdBy    User                  @relation("ReminderCreator", fields: [createdById], references: [id])
   recipient    User                  @relation("ReminderRecipient", fields: [recipientId], references: [id])
   participants ReminderParticipant[]
+  comments     ReminderComment[]
+  attachments  ReminderAttachment[]
+}
+
+model ReminderComment {
+  id         String   @id @default(cuid())
+  reminderId String
+  authorId   String
+  body       String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @default(now()) @updatedAt
+  author     User     @relation(fields: [authorId], references: [id])
+  reminder   Reminder @relation(fields: [reminderId], references: [id], onDelete: Cascade)
+
+  @@index([reminderId, createdAt])
+}
+
+model ReminderAttachment {
+  id            String   @id @default(cuid())
+  reminderId    String
+  uploaderId    String
+  fileName      String
+  mimeType      String
+  size          Int
+  storagePath   String?  @unique
+  legacyContent Bytes?   @map("content")
+  createdAt     DateTime @default(now())
+  uploader      User     @relation(fields: [uploaderId], references: [id])
+  reminder      Reminder @relation(fields: [reminderId], references: [id], onDelete: Cascade)
+
+  @@index([reminderId, createdAt])
 }
 
 model Request {
@@ -154,6 +190,37 @@ model Request {
   approval     ApprovalRequest?
   assignedTo   User             @relation("RequestAssignee", fields: [assignedToId], references: [id])
   requester    User             @relation("RequestRequester", fields: [requesterId], references: [id])
+  comments     RequestComment[]
+  attachments  RequestAttachment[]
+}
+
+model RequestComment {
+  id        String   @id @default(cuid())
+  requestId String
+  authorId  String
+  body      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+  author    User     @relation(fields: [authorId], references: [id])
+  request   Request  @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([requestId, createdAt])
+}
+
+model RequestAttachment {
+  id            String   @id @default(cuid())
+  requestId     String
+  uploaderId    String
+  fileName      String
+  mimeType      String
+  size          Int
+  storagePath   String?  @unique
+  legacyContent Bytes?   @map("content")
+  createdAt     DateTime @default(now())
+  uploader      User     @relation(fields: [uploaderId], references: [id])
+  request       Request  @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([requestId, createdAt])
 }
 
 model TaskParticipant {
@@ -199,6 +266,7 @@ model Meeting {
   updatedAt    DateTime             @updatedAt
   organizer    User                 @relation("MeetingOrganizer", fields: [organizerId], references: [id])
   comments     MeetingComment[]
+  attachments  MeetingAttachment[]
   participants MeetingParticipant[]
 }
 
@@ -219,6 +287,22 @@ model MeetingComment {
   createdAt DateTime @default(now())
   author    User     @relation(fields: [authorId], references: [id])
   meeting   Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId, createdAt])
+}
+
+model MeetingAttachment {
+  id            String   @id @default(cuid())
+  meetingId     String
+  uploaderId    String
+  fileName      String
+  mimeType      String
+  size          Int
+  storagePath   String?  @unique
+  legacyContent Bytes?   @map("content")
+  createdAt     DateTime @default(now())
+  uploader      User     @relation(fields: [uploaderId], references: [id])
+  meeting       Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
 
   @@index([meetingId, createdAt])
 }
