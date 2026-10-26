@@ -42,8 +42,8 @@ export class RemindersController {
   @Get() @Permissions('reminders:read') list(@Req() r: any) { return this.s.list(r.user.id); }
   @Post() @Permissions('reminders:write') create(@Body() d: ReminderDto, @Req() r: any) { return this.s.create(d, r.user.id); }
   @Get(':id') get(@Param('id') id: string, @Req() req: any) { return this.s.get(id, req.user.id); }
-  @Patch(':id') @Permissions('reminders:write') update(@Param('id') id: string, @Body() d: UpdateReminderDto) { return this.s.update(id, d); }
-  @Patch(':id/status') @Permissions('reminders:write') status(@Param('id') id: string, @Body() dto: ReminderStatusDto) { return this.s.status(id, dto.status); }
+  @Patch(':id') @Permissions('reminders:write') update(@Param('id') id: string, @Body() d: UpdateReminderDto, @Req() req: any) { return this.s.update(id, d, req.user.id); }
+  @Patch(':id/status') @Permissions('reminders:write') status(@Param('id') id: string, @Body() dto: ReminderStatusDto, @Req() req: any) { return this.s.status(id, dto.status, req.user.id); }
 
   @Get(':id/comments') comments(@Param('id') id: string, @Req() req: any) { return this.s.listComments(id, req.user.id); }
   @Post(':id/comments') addComment(@Param('id') id: string, @Body() dto: ReminderCommentDto, @Req() req: any) { return this.s.addComment(id, req.user.id, dto.body); }
@@ -84,5 +84,5 @@ export class RemindersController {
     response.send(attachment.content);
   }
 
-  @Delete(':id') @Permissions('reminders:write') remove(@Param('id') id: string) { return this.s.remove(id); }
+  @Delete(':id') @Permissions('reminders:write') remove(@Param('id') id: string, @Req() req: any) { return this.s.remove(id, req.user.id); }
 }

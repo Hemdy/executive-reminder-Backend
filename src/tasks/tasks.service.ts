@@ -72,14 +72,10 @@ export class TasksService {
       },
       include: this.taskInclude
     });
-    const creator = await this.db.user.findUnique({
-      where: { id: userId },
-      select: { firstName: true, lastName: true }
-    });
     await this.notifications.createForUsers(
       {
         title: 'New task assigned',
-        message: `${creator?.firstName ?? 'A user'} ${creator?.lastName ?? ''} assigned you "${task.title}".${task.description ? ` ${task.description}` : ''}`,
+        message: `${task.createdBy.firstName} ${task.createdBy.lastName} assigned you "${task.title}".${task.description ? ` ${task.description}` : ''}`,
         type: 'TASK_ASSIGNED',
         priority: task.priority,
         sourceId: task.id,
@@ -87,7 +83,7 @@ export class TasksService {
         resourceType: 'task',
         route: `/tasks/${task.id}`
       },
-      recipients,
+      recipients.filter(recipientId => recipientId !== userId),
       `task_assigned:${task.id}:${task.updatedAt.toISOString()}`,
     );
     return task;
@@ -111,11 +107,21 @@ export class TasksService {
     return item;
   }
 
-  async update(id: string, dto: any) {
+  async update(id: string, dto: any, userId: string) {
     const { participantIds, ...taskData } = dto;
     const existing = await this.db.task.findUniqueOrThrow({
       where: { id },
-      select: { assignedToId: true }
+      select: {
+        assignedToId: true,
+        createdById: true,
+        status: true,
+        dueDate: true,
+        title: true,
+        description: true,
+        priority: true,
+        category: true,
+        participants: { select: { userId: true } }
+      }
     });
     if (participantIds) {
       await this.db.taskParticipant.deleteMany({ where: { taskId: id } });
@@ -135,26 +141,97 @@ export class TasksService {
       },
       include: this.taskInclude
     });
-    if (task.assignedToId !== existing.assignedToId) {
-      await this.notifications.createForUsers(
-        {
-          title: 'New task assigned',
-          message: `${task.createdBy.firstName} ${task.createdBy.lastName} assigned you "${task.title}".${task.description ? ` ${task.description}` : ''}`,
-          type: 'TASK_ASSIGNED',
-          priority: task.priority,
-          sourceId: task.id,
-          referenceId: task.id,
-          resourceType: 'task',
-          route: `/tasks/${task.id}`
-        },
-        [task.assignedToId],
-        `task_assigned:${task.id}:${task.updatedAt.toISOString()}`
+    const assignmentChanged = task.assignedToId !== existing.assignedToId;
+    const statusChanged = task.status !== existing.status;
+    const deadlineChanged = task.dueDate.getTime() !== existing.dueDate.getTime();
+    const contentChanged =
+      task.title !== existing.title ||
+      task.description !== existing.description ||
+      task.priority !== existing.priority ||
+      task.category !== existing.category;
+    const participantsChanged =
+      existing.participants.length !== task.participants.length ||
+      existing.participants.some(({ userId: participantId }) =>
+        !task.participants.some(participant => participant.userId === participantId)
       );
+    const recipients = [
+      task.assignedToId,
+      task.createdById,
+      ...task.participants.map(({ userId: participantId }) => participantId)
+    ].filter(recipientId => recipientId !== userId);
+    const title = assignmentChanged
+      ? 'Task assignment updated'
+      : statusChanged
+        ? task.status === 'CANCELLED'
+          ? 'Task cancelled'
+          : task.status === 'COMPLETED'
+            ? 'Task completed'
+            : 'Task status updated'
+        : deadlineChanged
+          ? 'Task deadline updated'
+          : participantsChanged
+            ? 'Task participants updated'
+            : 'Task updated';
+    const message = assignmentChanged
+      ? `"${task.title}" has been assigned to ${task.assignedTo.firstName} ${task.assignedTo.lastName}.`
+      : statusChanged
+        ? `"${task.title}" is now ${task.status.replaceAll('_', ' ').toLowerCase()}.`
+        : deadlineChanged
+          ? `The deadline for "${task.title}" has changed to ${task.dueDate.toISOString().slice(0, 10)}.`
+          : participantsChanged
+            ? `The participants for "${task.title}" have changed.`
+            : `"${task.title}" has been updated.`;
+    if (assignmentChanged || statusChanged || deadlineChanged || participantsChanged || contentChanged) {
+      await this.notifications.suppressPendingPushNotifications('task', task.id);
+      if (recipients.length) {
+        await this.notifications.createForUsers(
+          {
+            title,
+            message,
+            type: statusChanged ? 'TASK_STATUS' : assignmentChanged ? 'TASK_ASSIGNED' : 'TASK_UPDATED',
+            priority: task.priority,
+            sourceId: task.id,
+            referenceId: task.id,
+            resourceType: 'task',
+            route: `/tasks/${task.id}`
+          },
+          recipients,
+          `task_updated:${task.id}:${task.updatedAt.toISOString()}`
+        );
+      }
     }
     return task;
   }
 
-  remove(id: string) {
+  async remove(id: string, userId: string) {
+    const task = await this.db.task.findUniqueOrThrow({
+      where: { id },
+      select: {
+        id: true,
+        title: true,
+        priority: true,
+        createdAt: true,
+        assignedToId: true,
+        createdById: true,
+        participants: { select: { userId: true } }
+      }
+    });
+    await this.notifications.suppressPendingPushNotifications('task', task.id);
+    await this.notifications.createForUsers(
+      {
+        title: 'Task deleted',
+        message: `"${task.title}" was deleted.`,
+        type: 'TASK_UPDATED',
+        priority: task.priority,
+        sourceId: task.id,
+        referenceId: task.id,
+        resourceType: 'task',
+        route: '/tasks'
+      },
+      [task.assignedToId, task.createdById, ...task.participants.map(({ userId: id }) => id)]
+        .filter(recipientId => recipientId !== userId),
+      `task_deleted:${task.id}:${task.createdAt.toISOString()}`
+    );
     return this.db.task.delete({ where: { id } });
   }
 
@@ -176,11 +253,38 @@ export class TasksService {
       }
     }
 
-    return this.db.task.update({
+    const updated = await this.db.task.update({
       where: { id },
       data: { status },
       include: this.taskInclude
     });
+    if (task.status !== status) {
+      const recipients = [
+        updated.assignedToId,
+        updated.createdById,
+        ...updated.participants.map(({ userId: participantId }) => participantId)
+      ].filter(recipientId => recipientId !== userId);
+      await this.notifications.suppressPendingPushNotifications('task', updated.id);
+      await this.notifications.createForUsers(
+        {
+          title: status === TaskStatus.CANCELLED
+            ? 'Task cancelled'
+            : status === TaskStatus.COMPLETED
+              ? 'Task completed'
+              : 'Task status updated',
+          message: `"${updated.title}" is now ${updated.status.replaceAll('_', ' ').toLowerCase()}.`,
+          type: 'TASK_STATUS',
+          priority: updated.priority,
+          sourceId: updated.id,
+          referenceId: updated.id,
+          resourceType: 'task',
+          route: `/tasks/${updated.id}`
+        },
+        recipients,
+        `task_status:${updated.id}:${updated.updatedAt.toISOString()}`
+      );
+    }
+    return updated;
   }
 
   async listComments(taskId: string, userId: string) {

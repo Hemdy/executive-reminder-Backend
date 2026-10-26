@@ -57,8 +57,8 @@ export class TasksController {
 
   @Patch(':id')
   @Permissions('tasks:write')
-  update(@Param('id') id: string, @Body() dto: UpdateTaskDto) {
-    return this.service.update(id, dto);
+  update(@Param('id') id: string, @Body() dto: UpdateTaskDto, @Req() req: any) {
+    return this.service.update(id, dto, req.user.id);
   }
 
   @Patch(':id/status')
@@ -131,7 +131,7 @@ export class TasksController {
 
   @Delete(':id')
   @Permissions('tasks:write')
-  remove(@Param('id') id: string) {
-    return this.service.remove(id);
+  remove(@Param('id') id: string, @Req() req: any) {
+    return this.service.remove(id, req.user.id);
   }
 }

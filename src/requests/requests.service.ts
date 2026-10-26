@@ -57,11 +57,26 @@ export class RequestsService {
     });
   }
 
-  create(d: any, id: string) {
-    return this.db.request.create({
+  async create(d: any, id: string) {
+    const request = await this.db.request.create({
       data: { ...d, dueDate: d.dueDate ? new Date(d.dueDate) : undefined, requesterId: id },
       include: this.requestInclude,
     });
+    await this.notifications.createForUsers(
+      {
+        title: 'New request submitted',
+        message: `${request.requester.firstName} ${request.requester.lastName} submitted "${request.title}" for your review.`,
+        type: 'REQUEST',
+        priority: request.priority,
+        sourceId: request.id,
+        referenceId: request.id,
+        resourceType: 'request',
+        route: `/requests/${request.id}`,
+      },
+      [request.assignedToId].filter(recipientId => recipientId !== id),
+      `request_created:${request.id}`,
+    );
+    return request;
   }
 
   async get(id: string, userId: string) {
@@ -79,24 +94,132 @@ export class RequestsService {
     return request;
   }
 
-  update(id: string, d: any) {
-    return this.db.request.update({
+  async update(id: string, d: any, actorId: string) {
+    const existing = await this.db.request.findUniqueOrThrow({
+      where: { id },
+      select: {
+        title: true,
+        description: true,
+        type: true,
+        priority: true,
+        dueDate: true,
+        status: true,
+        requesterId: true,
+        assignedToId: true,
+      },
+    });
+    const request = await this.db.request.update({
       where: { id },
       data: { ...d, dueDate: d.dueDate ? new Date(d.dueDate) : undefined },
       include: this.requestInclude,
     });
+    const changed =
+      request.title !== existing.title ||
+      request.description !== existing.description ||
+      request.type !== existing.type ||
+      request.priority !== existing.priority ||
+      request.status !== existing.status ||
+      request.assignedToId !== existing.assignedToId ||
+      (request.dueDate?.getTime() ?? null) !== (existing.dueDate?.getTime() ?? null);
+    if (changed) {
+      await this.notifications.suppressPendingPushNotifications('request', request.id);
+      await this.notifications.createForUsers(
+        {
+          title: request.status === 'APPROVED'
+            ? 'Request approved'
+            : request.status === 'REJECTED'
+              ? 'Request rejected'
+              : request.status === 'CANCELLED'
+                ? 'Request cancelled'
+              : request.status === 'NEEDS_INFORMATION'
+                ? 'Additional information requested'
+                : request.status !== existing.status
+                  ? 'Request status updated'
+                  : 'Request updated',
+          message: request.status !== existing.status
+            ? `"${request.title}" is now ${request.status.replaceAll('_', ' ').toLowerCase()}.`
+            : `"${request.title}" has been updated.`,
+          type: 'REQUEST',
+          priority: request.priority,
+          sourceId: request.id,
+          referenceId: request.id,
+          resourceType: 'request',
+          route: `/requests/${request.id}`,
+        },
+        [request.requesterId, request.assignedToId]
+          .filter(recipientId => recipientId !== actorId),
+        `request_updated:${request.id}:${request.updatedAt.toISOString()}`,
+      );
+    }
+    return request;
   }
 
-  remove(id: string) {
+  async remove(id: string, actorId: string) {
+    const request = await this.db.request.findUniqueOrThrow({
+      where: { id },
+      select: {
+        id: true,
+        title: true,
+        priority: true,
+        createdAt: true,
+        requesterId: true,
+        assignedToId: true,
+      },
+    });
+    await this.notifications.suppressPendingPushNotifications('request', request.id);
+    await this.notifications.createForUsers(
+      {
+        title: 'Request deleted',
+        message: `"${request.title}" was deleted.`,
+        type: 'REQUEST',
+        priority: request.priority,
+        sourceId: request.id,
+        referenceId: request.id,
+        resourceType: 'request',
+        route: '/requests',
+      },
+      [request.requesterId, request.assignedToId].filter(recipientId => recipientId !== actorId),
+      `request_deleted:${request.id}:${request.createdAt.toISOString()}`,
+    );
     return this.db.request.delete({ where: { id } });
   }
 
-  status(id: string, status: string) {
-    return this.db.request.update({
+  async status(id: string, status: string, actorId: string) {
+    const existing = await this.db.request.findUniqueOrThrow({
+      where: { id },
+      select: { status: true },
+    });
+    const request = await this.db.request.update({
       where: { id },
       data: { status: status as never },
       include: this.requestInclude,
     });
+    if (existing.status !== request.status) {
+      await this.notifications.suppressPendingPushNotifications('request', request.id);
+      await this.notifications.createForUsers(
+        {
+          title: request.status === 'APPROVED'
+            ? 'Request approved'
+            : request.status === 'REJECTED'
+              ? 'Request rejected'
+              : request.status === 'CANCELLED'
+                ? 'Request cancelled'
+              : request.status === 'NEEDS_INFORMATION'
+                ? 'Additional information requested'
+                : 'Request status updated',
+          message: `"${request.title}" is now ${request.status.replaceAll('_', ' ').toLowerCase()}.`,
+          type: 'REQUEST',
+          priority: request.priority,
+          sourceId: request.id,
+          referenceId: request.id,
+          resourceType: 'request',
+          route: `/requests/${request.id}`,
+        },
+        [request.requesterId, request.assignedToId].filter(recipientId => recipientId !== actorId),
+        `request_status:${request.id}:${request.updatedAt.toISOString()}`,
+      );
+    }
+    return request;
   }
 
   async listComments(requestId: string, userId: string) {
@@ -275,4 +398,3 @@ export class RequestsService {
     }
   }
 }
-

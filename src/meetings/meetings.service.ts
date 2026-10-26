@@ -70,7 +70,8 @@ export class MeetingsService {
       include: this.meetingInclude,
     });
 
-    if (invitedIds.length) {
+    const recipients = invitedIds.filter(userId => userId !== organizerId);
+    if (recipients.length) {
       await this.notifications.createForUsers(
         {
           title: 'New meeting invitation',
@@ -82,7 +83,7 @@ export class MeetingsService {
           resourceType: 'meeting',
           route: `/meetings/${meeting.id}`,
         },
-        invitedIds,
+        recipients,
         `meeting_scheduled:${meeting.id}`,
       );
     }
@@ -98,10 +99,26 @@ export class MeetingsService {
     return meeting;
   }
 
-  async update(id: string, dto: any) {
+  async update(id: string, dto: any, actorId: string) {
     const { participantIds = [], ...data } = dto;
+    const existing = await this.db.meeting.findUniqueOrThrow({
+      where: { id },
+      select: {
+        organizerId: true,
+        title: true,
+        description: true,
+        agenda: true,
+        meetingDate: true,
+        startTime: true,
+        endTime: true,
+        location: true,
+        meetingType: true,
+        status: true,
+        participants: { select: { userId: true } },
+      },
+    });
     await this.db.meetingParticipant.deleteMany({ where: { meetingId: id } });
-    return this.db.meeting.update({
+    const meeting = await this.db.meeting.update({
       where: { id },
       data: {
         ...data,
@@ -110,6 +127,44 @@ export class MeetingsService {
       },
       include: this.meetingInclude,
     });
+    const oldParticipantIds = existing.participants.map(({ userId }) => userId);
+    const newParticipantIds = meeting.participants.map(({ userId }) => userId);
+    const participantsChanged =
+      oldParticipantIds.length !== newParticipantIds.length ||
+      oldParticipantIds.some(userId => !newParticipantIds.includes(userId));
+    const detailsChanged =
+      meeting.title !== existing.title ||
+      meeting.description !== existing.description ||
+      meeting.agenda !== existing.agenda ||
+      meeting.meetingDate.getTime() !== existing.meetingDate.getTime() ||
+      meeting.startTime !== existing.startTime ||
+      meeting.endTime !== existing.endTime ||
+      meeting.location !== existing.location ||
+      meeting.meetingType !== existing.meetingType ||
+      meeting.status !== existing.status;
+    if (participantsChanged || detailsChanged) {
+      await this.notifications.suppressPendingPushNotifications('meeting', meeting.id);
+      await this.notifications.createForUsers(
+        {
+          title: meeting.status === 'CANCELLED' ? 'Meeting cancelled' : 'Meeting updated',
+          message: meeting.status === 'CANCELLED'
+            ? `"${meeting.title}" has been cancelled.`
+            : `"${meeting.title}" has been updated. It is scheduled for ${meeting.meetingDate.toISOString().slice(0, 10)} at ${meeting.startTime}.`,
+          type: 'MEETING',
+          priority: 'MEDIUM',
+          sourceId: meeting.id,
+          referenceId: meeting.id,
+          resourceType: 'meeting',
+          route: `/meetings/${meeting.id}`,
+        },
+        [
+          meeting.organizerId,
+          ...newParticipantIds,
+        ].filter(recipientId => recipientId !== actorId),
+        `meeting_updated:${meeting.id}:${meeting.updatedAt.toISOString()}`,
+      );
+    }
+    return meeting;
   }
 
   async listComments(meetingId: string, userId: string) {
@@ -262,16 +317,67 @@ export class MeetingsService {
     throw new BadGatewayException('Meeting attachment is missing its stored file');
   }
 
-  remove(id: string) {
+  async remove(id: string, actorId: string) {
+    const meeting = await this.db.meeting.findUniqueOrThrow({
+      where: { id },
+      select: {
+        id: true,
+        title: true,
+        organizerId: true,
+        createdAt: true,
+        participants: { select: { userId: true } },
+      },
+    });
+    await this.notifications.suppressPendingPushNotifications('meeting', meeting.id);
+    await this.notifications.createForUsers(
+      {
+        title: 'Meeting deleted',
+        message: `"${meeting.title}" was deleted.`,
+        type: 'MEETING',
+        priority: 'MEDIUM',
+        sourceId: meeting.id,
+        referenceId: meeting.id,
+        resourceType: 'meeting',
+        route: '/meetings',
+      },
+      [meeting.organizerId, ...meeting.participants.map(({ userId }) => userId)]
+        .filter(recipientId => recipientId !== actorId),
+      `meeting_deleted:${meeting.id}:${meeting.createdAt.toISOString()}`,
+    );
     return this.db.meeting.delete({ where: { id } });
   }
 
-  status(id: string, status: string) {
-    return this.db.meeting.update({
+  async status(id: string, status: string, actorId: string) {
+    const existing = await this.db.meeting.findUniqueOrThrow({
+      where: { id },
+      select: { status: true },
+    });
+    const meeting = await this.db.meeting.update({
       where: { id },
       data: { status: status as never },
       include: this.meetingInclude,
     });
+    if (existing.status !== meeting.status) {
+      await this.notifications.suppressPendingPushNotifications('meeting', meeting.id);
+      await this.notifications.createForUsers(
+        {
+          title: meeting.status === 'CANCELLED' ? 'Meeting cancelled' : 'Meeting status updated',
+          message: meeting.status === 'CANCELLED'
+            ? `"${meeting.title}" has been cancelled.`
+            : `"${meeting.title}" is now ${meeting.status.replaceAll('_', ' ').toLowerCase()}.`,
+          type: 'MEETING',
+          priority: 'MEDIUM',
+          sourceId: meeting.id,
+          referenceId: meeting.id,
+          resourceType: 'meeting',
+          route: `/meetings/${meeting.id}`,
+        },
+        [meeting.organizerId, ...meeting.participants.map(({ userId }) => userId)]
+          .filter(recipientId => recipientId !== actorId),
+        `meeting_status:${meeting.id}:${meeting.updatedAt.toISOString()}`,
+      );
+    }
+    return meeting;
   }
 
   private hasValidFileSignature(extension: string, content: Buffer): boolean {

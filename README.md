@@ -46,28 +46,48 @@ The Vercel-compatible function entry point is `api/index.ts`.
 
 ### Push notifications
 
-The backend sends standards-based Web Push notifications through VAPID. Generate
-a key pair from this folder with `npx web-push generate-vapid-keys` and set
-`VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and `VAPID_SUBJECT` in the backend
-environment. Set `CRON_SECRET` to a separate long random value; Vercel Cron
-uses it to authorize `GET /api/notifications/push/dispatch`. Configure
-`REMINDER_TIMEZONE` to an IANA timezone (currently `Africa/Lagos`) for reminder
-due-time calculations.
+The backend sends standards-based Web Push notifications through VAPID. Reuse
+the existing `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and `VAPID_SUBJECT` values
+in the backend environment; do not generate a replacement key pair. Keep the
+private key exclusively in backend/server configuration. The authenticated
+frontend obtains only the public key from `GET /api/notifications/push/config`.
+Never add either private VAPID or Supabase service-role credentials to Angular
+configuration or `public/app-config.js`.
 
-Apply the new Supabase migration with `npm run prisma:migrate:deploy` before
-deploying the API. The migration adds per-user browser push subscriptions,
-idempotent notification event keys, a push delivery queue, and meeting comments.
-Vercel Cron checks due reminders and pending Web Push deliveries every minute.
-The once-per-minute schedule requires a Vercel plan that supports minute-level
-Cron jobs; verify the plan limit before deployment.
-Only the authenticated user can register or remove their own push subscription.
-Task and meeting comments notify the other members of the task or meeting.
+Push subscriptions are owned by the authenticated user. The notification
+center lets a user enable/disable this device and choose push categories for
+Tasks, Reminders, Requests, and Meetings. These category preferences do not
+disable or remove in-app notifications. Event records are deduplicated per user
+and event; push deliveries use retryable claims and remove subscriptions that a
+push provider reports as expired. Tapping a push opens the associated item (or
+the relevant list for deleted items).
+
+The protected `GET /api/notifications/push/dispatch` job dispatches queued push
+notifications, due reminders, and meeting reminders scheduled within 15
+minutes. Vercel is configured to call it once per minute. Set `CRON_SECRET` to
+a separate long random value; the endpoint requires the matching bearer token.
+`CRON_SECRET` is present in `.env.example` but is not currently configured in
+the local backend `.env`; set it there to test the protected dispatcher locally.
+The deployment plan must support minute-level Vercel Cron jobs and the cron
+must be enabled on the production deployment. Set `REMINDER_TIMEZONE` to the
+IANA timezone used for reminder and meeting schedule calculations (defaults to
+`Africa/Lagos`).
+
+Apply all pending Prisma migrations with `npm run prisma:migrate:deploy` before
+deploying. The Web Push migration creates the per-user subscription and
+idempotency queue tables; the notification preferences migration adds
+per-user category controls and task update/status notification types. No
+Supabase Edge Function or client-side database access is used: notifications
+are written by the existing authenticated NestJS/Prisma backend, with the
+Supabase Postgres database as its data store.
 
 Push notifications require HTTPS and an installed/accepted PWA on supported
 browsers. On iOS, Web Push is available to web apps added to the Home Screen
-with iOS/iPadOS 16.4 or later. The user must enable notifications from the
-Notifications page after signing in. Without VAPID keys, push subscription is
-reported as unavailable; in-app notifications continue to work.
+with iOS/iPadOS 16.4 or later. Android and desktop delivery also depends on
+browser/OS support, connectivity, and user permission. The user must enable
+notifications from the Notifications page after signing in. Without the
+existing VAPID configuration, push subscription is reported as unavailable;
+in-app notifications continue to work.
 
 Tasks support comments at `GET/POST /tasks/:id/comments` and file metadata at
 `GET /tasks/:id/attachments`. Upload with multipart field `file` to
@@ -105,6 +125,14 @@ Preview, and Development environments as appropriate:
   Storage access; never expose it to the frontend.
 - `SUPABASE_STORAGE_BUCKET`: optional private bucket name (defaults to
   `task-attachments`).
+- `VAPID_PUBLIC_KEY`: the existing Web Push public key; it is exposed only by
+  the push configuration endpoint for subscription registration.
+- `VAPID_PRIVATE_KEY`: the matching existing Web Push private key; backend-only.
+- `VAPID_SUBJECT`: the existing VAPID contact URI, for example a `mailto:` URI.
+- `CRON_SECRET`: a separate long random secret used to authorize the scheduled
+  push/reminder dispatch endpoint.
+- `REMINDER_TIMEZONE`: optional IANA timezone for scheduled reminder and
+  meeting calculations (defaults to `Africa/Lagos`).
 
 Copy the connection strings from Supabase Dashboard → Connect. The Supabase
 project URL and publishable key you provided are not used by this Prisma
@@ -115,8 +143,11 @@ database connection string or any database password.
 
 After setting the variables locally, run `npm run prisma:migrate:deploy` once
 with the Production `DIRECT_URL`, optionally run `npm run prisma:seed`, then
-redeploy so the function receives the runtime variables. The initial migration
-is stored in `prisma/migrations`.
+redeploy so the function receives the runtime variables and the production
+deployment activates its once-per-minute cron. Copy the already-generated
+VAPID key pair from secure server-side configuration; do not generate or
+commit another pair. The checked-in Prisma migrations are stored in
+`prisma/migrations`.
 The API routes are served below `/api` (for example, `POST /api/auth/login`).
 
 ### Local frontend-to-database test

@@ -15,7 +15,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { timingSafeEqual } from 'node:crypto';
-import { IsEnum, IsInt, IsOptional, IsString, IsUrl, Length, ValidateNested } from 'class-validator';
+import { IsBoolean, IsEnum, IsInt, IsOptional, IsString, IsUrl, Length, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 import { NotificationType, Priority } from '@prisma/client';
 import { Permissions } from '../common/decorators';
@@ -48,11 +48,26 @@ class NotificationDto {
   @IsOptional() @IsString() route?: string;
 }
 
+class PushPreferencesDto {
+  @IsOptional() @IsBoolean() tasks?: boolean;
+  @IsOptional() @IsBoolean() reminders?: boolean;
+  @IsOptional() @IsBoolean() requests?: boolean;
+  @IsOptional() @IsBoolean() meetings?: boolean;
+}
+
 @Controller('notifications')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 export class NotificationsController {
   constructor(private readonly service: NotificationsService) {}
   @Get() list(@Req() request: any) { return this.service.list(request.user.id); }
+  @Get('push/preferences')
+  pushPreferences(@Req() request: any) {
+    return this.service.getPushPreferences(request.user.id);
+  }
+  @Patch('push/preferences')
+  updatePushPreferences(@Body() dto: PushPreferencesDto, @Req() request: any) {
+    return this.service.updatePushPreferences(request.user.id, dto);
+  }
   @Post('push/subscription')
   savePushSubscription(@Body() dto: PushSubscriptionDto, @Req() request: any) {
     return this.service.savePushSubscription(request.user.id, dto);
@@ -103,7 +118,8 @@ export class PushCronController {
   @Get('dispatch')
   async dispatch() {
     const dueReminders = await this.service.dispatchDueReminders();
+    const dueMeetingReminders = await this.service.dispatchDueMeetingReminders();
     const deliveredPushes = await this.service.dispatchPendingPushNotifications();
-    return { dueReminders, deliveredPushes };
+    return { dueReminders, dueMeetingReminders, deliveredPushes };
   }
 }

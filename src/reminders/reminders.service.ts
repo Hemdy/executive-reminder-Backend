@@ -88,7 +88,7 @@ export class RemindersService {
         resourceType: 'reminder',
         route: `/reminders/${reminder.id}`,
       },
-      recipients,
+      recipients.filter(recipientId => recipientId !== userId),
       `reminder_created:${reminder.id}`,
     );
     return reminder;
@@ -112,12 +112,28 @@ export class RemindersService {
     return reminder;
   }
 
-  async update(id: string, dto: any) {
+  async update(id: string, dto: any, userId: string) {
     const { participantIds, ...reminderData } = dto;
+    const existing = await this.db.reminder.findUniqueOrThrow({
+      where: { id },
+      select: {
+        recipientId: true,
+        createdById: true,
+        reminderDate: true,
+        reminderTime: true,
+        title: true,
+        description: true,
+        priority: true,
+        category: true,
+        recurrence: true,
+        status: true,
+        participants: { select: { userId: true } },
+      },
+    });
     if (participantIds) {
       await this.db.reminderParticipant.deleteMany({ where: { reminderId: id } });
     }
-    return this.db.reminder.update({
+    const reminder = await this.db.reminder.update({
       where: { id },
       data: {
         ...reminderData,
@@ -132,18 +148,134 @@ export class RemindersService {
       },
       include: this.reminderInclude,
     });
+    const scheduleChanged =
+      reminder.reminderDate.getTime() !== existing.reminderDate.getTime() ||
+      reminder.reminderTime !== existing.reminderTime ||
+      reminder.recurrence !== existing.recurrence;
+    const contentChanged =
+      reminder.title !== existing.title ||
+      reminder.description !== existing.description ||
+      reminder.priority !== existing.priority ||
+      reminder.category !== existing.category;
+    const recipientChanged = reminder.recipientId !== existing.recipientId;
+    const statusChanged = reminder.status !== existing.status;
+    const priorParticipantIds = existing.participants.map(({ userId }) => userId);
+    const updatedParticipantIds = reminder.participants.map(({ userId }) => userId);
+    const participantsChanged =
+      priorParticipantIds.length !== updatedParticipantIds.length ||
+      priorParticipantIds.some(userId => !updatedParticipantIds.includes(userId));
+    const recipients = [
+      reminder.recipientId,
+      reminder.createdById,
+      ...reminder.participants.map(({ userId: participantId }) => participantId),
+    ].filter(recipientId => recipientId !== userId);
+    if (scheduleChanged || contentChanged || recipientChanged || statusChanged || participantsChanged) {
+      await this.notifications.suppressPendingPushNotifications('reminder', reminder.id);
+      if (recipients.length) {
+        await this.notifications.createForUsers(
+          {
+            title: scheduleChanged
+              ? 'Reminder rescheduled'
+              : recipientChanged
+                ? 'Reminder reassigned'
+                : statusChanged
+                  ? reminder.status === 'CANCELLED' || reminder.status === 'DISMISSED'
+                    ? 'Reminder cancelled'
+                    : reminder.status === 'COMPLETED'
+                      ? 'Reminder completed'
+                      : 'Reminder status updated'
+                  : participantsChanged
+                    ? 'Reminder participants updated'
+                    : 'Reminder updated',
+            message: scheduleChanged
+              ? `"${reminder.title}" is scheduled for ${reminder.reminderDate.toISOString().slice(0, 10)} at ${reminder.reminderTime}.`
+              : statusChanged
+                ? `"${reminder.title}" is now ${reminder.status.replaceAll('_', ' ').toLowerCase()}.`
+                : `"${reminder.title}" has been updated.`,
+            type: 'REMINDER',
+            priority: reminder.priority,
+            sourceId: reminder.id,
+            referenceId: reminder.id,
+            resourceType: 'reminder',
+            route: `/reminders/${reminder.id}`,
+          },
+          recipients,
+          `reminder_updated:${reminder.id}:${reminder.updatedAt.toISOString()}`,
+        );
+      }
+    }
+    return reminder;
   }
 
-  remove(id: string) {
+  async remove(id: string, userId: string) {
+    const reminder = await this.db.reminder.findUniqueOrThrow({
+      where: { id },
+      select: {
+        id: true,
+        title: true,
+        priority: true,
+        createdAt: true,
+        recipientId: true,
+        createdById: true,
+        participants: { select: { userId: true } },
+      },
+    });
+    await this.notifications.suppressPendingPushNotifications('reminder', reminder.id);
+    await this.notifications.createForUsers(
+      {
+        title: 'Reminder deleted',
+        message: `"${reminder.title}" was deleted.`,
+        type: 'REMINDER',
+        priority: reminder.priority,
+        sourceId: reminder.id,
+        referenceId: reminder.id,
+        resourceType: 'reminder',
+        route: '/reminders',
+      },
+      [reminder.recipientId, reminder.createdById, ...reminder.participants.map(({ userId: id }) => id)]
+        .filter(recipientId => recipientId !== userId),
+      `reminder_deleted:${reminder.id}:${reminder.createdAt.toISOString()}`,
+    );
     return this.db.reminder.delete({ where: { id } });
   }
 
-  status(id: string, status: string) {
-    return this.db.reminder.update({
+  async status(id: string, status: string, userId: string) {
+    const existing = await this.db.reminder.findUniqueOrThrow({
+      where: { id },
+      select: { status: true },
+    });
+    const reminder = await this.db.reminder.update({
       where: { id },
       data: { status: status as never },
       include: this.reminderInclude,
     });
+    if (existing.status !== reminder.status) {
+      const recipients = [
+        reminder.recipientId,
+        reminder.createdById,
+        ...reminder.participants.map(({ userId: participantId }) => participantId),
+      ].filter(recipientId => recipientId !== userId);
+      await this.notifications.suppressPendingPushNotifications('reminder', reminder.id);
+      await this.notifications.createForUsers(
+        {
+          title: reminder.status === 'CANCELLED' || reminder.status === 'DISMISSED'
+            ? 'Reminder cancelled'
+            : reminder.status === 'COMPLETED'
+              ? 'Reminder completed'
+              : 'Reminder status updated',
+          message: `"${reminder.title}" is now ${reminder.status.replaceAll('_', ' ').toLowerCase()}.`,
+          type: 'REMINDER',
+          priority: reminder.priority,
+          sourceId: reminder.id,
+          referenceId: reminder.id,
+          resourceType: 'reminder',
+          route: `/reminders/${reminder.id}`,
+        },
+        recipients,
+        `reminder_status:${reminder.id}:${reminder.updatedAt.toISOString()}`,
+      );
+    }
+    return reminder;
   }
 
   async listComments(reminderId: string, userId: string) {
@@ -326,4 +458,3 @@ export class RemindersService {
     }
   }
 }
-

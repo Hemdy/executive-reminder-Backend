@@ -27,6 +27,13 @@ interface PushSubscriptionInput {
   keys: { p256dh: string; auth: string };
 }
 
+export interface PushPreferences {
+  tasks: boolean;
+  reminders: boolean;
+  requests: boolean;
+  meetings: boolean;
+}
+
 @Injectable()
 export class NotificationsService {
   private readonly logger = new Logger(NotificationsService.name);
@@ -76,23 +83,82 @@ export class NotificationsService {
     recipientIds: string[],
     eventKey: string,
   ): Promise<void> {
-    const users = await this.db.user.findMany({
-      where: { id: { in: [...new Set(recipientIds)] }, isActive: true },
-      select: { id: true },
-    });
+    let users: { id: string }[];
+    try {
+      users = await this.db.user.findMany({
+        where: { id: { in: [...new Set(recipientIds)] }, isActive: true },
+        select: { id: true },
+      });
+    } catch (error) {
+      this.logger.error(
+        `Unable to resolve recipients for ${data.type} notification`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      return;
+    }
 
     for (const user of users) {
-      await this.db.$transaction(async transaction => {
-        const event = await transaction.notificationEvent.createMany({
-          data: [{ userId: user.id, eventKey }],
-          skipDuplicates: true,
-        });
-        if (event.count) {
-          await transaction.notification.create({
-            data: { ...data, userId: user.id, eventKey },
+      try {
+        await this.db.$transaction(async transaction => {
+          const event = await transaction.notificationEvent.createMany({
+            data: [{ userId: user.id, eventKey }],
+            skipDuplicates: true,
           });
-        }
+          if (event.count) {
+            await transaction.notification.create({
+              data: { ...data, userId: user.id, eventKey },
+            });
+          }
+        });
+      } catch (error) {
+        this.logger.error(
+          `Unable to persist ${data.type} notification for user ${user.id}`,
+          error instanceof Error ? error.stack : undefined,
+        );
+      }
+    }
+  }
+
+  async getPushPreferences(userId: string): Promise<PushPreferences> {
+    const preferences = await this.db.notificationPreference.upsert({
+      where: { userId },
+      create: { userId },
+      update: {},
+      select: { tasks: true, reminders: true, requests: true, meetings: true },
+    });
+    return preferences;
+  }
+
+  async updatePushPreferences(
+    userId: string,
+    updates: Partial<PushPreferences>,
+  ): Promise<PushPreferences> {
+    const preferences = await this.db.notificationPreference.upsert({
+      where: { userId },
+      create: { userId, ...updates },
+      update: updates,
+      select: { tasks: true, reminders: true, requests: true, meetings: true },
+    });
+    return preferences;
+  }
+
+  async suppressPendingPushNotifications(resourceType: string, referenceId: string): Promise<void> {
+    try {
+      await this.db.notification.updateMany({
+        where: {
+          resourceType,
+          referenceId,
+          eventKey: { not: null },
+          isRead: false,
+          pushSentAt: null,
+        },
+        data: { pushSentAt: new Date(), pushClaimedAt: null },
       });
+    } catch (error) {
+      this.logger.error(
+        `Unable to suppress obsolete ${resourceType} pushes for ${referenceId}`,
+        error instanceof Error ? error.stack : undefined,
+      );
     }
   }
 
@@ -183,6 +249,21 @@ export class NotificationsService {
         continue;
       }
 
+      const preferenceCategory = this.notificationPreferenceCategory(notification);
+      if (preferenceCategory) {
+        const preferences = await this.db.notificationPreference.findUnique({
+          where: { userId: notification.userId },
+          select: { tasks: true, reminders: true, requests: true, meetings: true },
+        });
+        if (preferences && !preferences[preferenceCategory]) {
+          await this.db.notification.update({
+            where: { id: notification.id },
+            data: { pushSentAt: now, pushClaimedAt: null },
+          });
+          continue;
+        }
+      }
+
       const subscriptions = await this.db.pushSubscription.findMany({
         where: { userId: notification.userId },
       });
@@ -202,6 +283,7 @@ export class NotificationsService {
           icon: '/icons/icon-192x192.png',
           badge: '/icons/icon-192x192.png',
           tag: notification.id,
+          timestamp: notification.createdAt.getTime(),
           data: {
             notificationId: notification.id,
             route,
@@ -298,6 +380,55 @@ export class NotificationsService {
     return dispatched;
   }
 
+  async dispatchDueMeetingReminders(now = new Date()): Promise<number> {
+    const localNow = this.localDateTime(now);
+    const today = `${localNow.year}-${String(localNow.month).padStart(2, '0')}-${String(localNow.day).padStart(2, '0')}`;
+    const tomorrow = new Date(Date.UTC(localNow.year, localNow.month - 1, localNow.day + 1));
+    const meetings = await this.db.meeting.findMany({
+      where: {
+        status: { in: ['SCHEDULED', 'RESCHEDULED'] },
+        meetingDate: {
+          gte: new Date(`${today}T00:00:00.000Z`),
+          lt: tomorrow,
+        },
+      },
+      include: {
+        participants: { select: { userId: true } },
+      },
+    });
+    const currentMinute = Number(localNow.time.slice(0, 2)) * 60 + Number(localNow.time.slice(3, 5));
+    let dispatched = 0;
+
+    for (const meeting of meetings) {
+      const startTime = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(meeting.startTime);
+      if (!startTime || meeting.meetingDate.toISOString().slice(0, 10) !== today) {
+        continue;
+      }
+      const meetingMinute = Number(startTime[1]) * 60 + Number(startTime[2]);
+      if (meetingMinute <= currentMinute || meetingMinute > currentMinute + 15) {
+        continue;
+      }
+
+      await this.createForUsers(
+        {
+          title: 'Meeting starting soon',
+          message: `"${meeting.title}" starts at ${meeting.startTime}.`,
+          type: NotificationType.MEETING,
+          priority: Priority.MEDIUM,
+          sourceId: meeting.id,
+          referenceId: meeting.id,
+          resourceType: 'meeting',
+          route: `/meetings/${meeting.id}`,
+        },
+        [meeting.organizerId, ...meeting.participants.map(({ userId }) => userId)],
+        `meeting_reminder:${meeting.id}:${meeting.meetingDate.toISOString()}:${meeting.startTime}`,
+      );
+      dispatched += 1;
+    }
+
+    return dispatched;
+  }
+
   private localDateTime(date: Date) {
     const parts = new Intl.DateTimeFormat('en-GB', {
       timeZone: this.reminderTimezone,
@@ -356,10 +487,29 @@ export class NotificationsService {
       return notification.route;
     }
     const id = notification.referenceId ?? notification.sourceId;
-    if (id && ['task', 'meeting', 'reminder'].includes(notification.resourceType ?? '')) {
+    if (id && ['task', 'meeting', 'reminder', 'request'].includes(notification.resourceType ?? '')) {
       return `/${notification.resourceType}s/${id}`;
     }
     return '/notifications';
+  }
+
+  private notificationPreferenceCategory(
+    notification: { resourceType: string | null; type: NotificationType },
+  ): keyof PushPreferences | undefined {
+    if (notification.resourceType === 'task' || notification.type === NotificationType.TASK_ASSIGNED ||
+        notification.type === NotificationType.TASK_DUE || notification.type === NotificationType.TASK_OVERDUE) {
+      return 'tasks';
+    }
+    if (notification.resourceType === 'reminder' || notification.type === NotificationType.REMINDER) {
+      return 'reminders';
+    }
+    if (notification.resourceType === 'request' || notification.type === NotificationType.REQUEST) {
+      return 'requests';
+    }
+    if (notification.resourceType === 'meeting' || notification.type === NotificationType.MEETING) {
+      return 'meetings';
+    }
+    return undefined;
   }
 
   private pushErrorStatus(error: unknown): number | undefined {
@@ -389,11 +539,20 @@ export class NotificationsService {
   }
 
   setRead(id: string, userId: string, isRead: boolean) {
-    return this.db.notification.updateMany({ where: { id, userId }, data: { isRead } });
+    return this.db.notification.updateMany({
+      where: { id, userId },
+      data: {
+        isRead,
+        ...(isRead ? { pushSentAt: new Date(), pushClaimedAt: null } : {}),
+      },
+    });
   }
 
   markAllRead(userId: string) {
-    return this.db.notification.updateMany({ where: { userId, isRead: false }, data: { isRead: true } });
+    return this.db.notification.updateMany({
+      where: { userId, isRead: false },
+      data: { isRead: true, pushSentAt: new Date(), pushClaimedAt: null },
+    });
   }
 
   remove(id: string, userId: string) {

@@ -4,7 +4,7 @@
   "crons": [
     {
       "path": "/api/notifications/push/dispatch",
-      "schedule": "0 9 * * *"
+      "schedule": "* * * * *"
     }
   ],
   "rewrites": [

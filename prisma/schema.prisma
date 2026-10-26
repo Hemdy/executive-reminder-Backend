@@ -30,6 +30,7 @@ model User {
   meetings             MeetingParticipant[]
   notifications        Notification[]
   notificationEvents   NotificationEvent[]
+  notificationPreference NotificationPreference?
   pushSubscriptions    PushSubscription[]
   remindersCreated     Reminder[]            @relation("ReminderCreator")
   remindersReceived    Reminder[]            @relation("ReminderRecipient")
@@ -321,6 +322,16 @@ model PushSubscription {
   @@index([userId])
 }
 
+model NotificationPreference {
+  userId    String   @id
+  tasks     Boolean  @default(true)
+  reminders Boolean  @default(true)
+  requests  Boolean  @default(true)
+  meetings  Boolean  @default(true)
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
 model NotificationEvent {
   id        String   @id @default(cuid())
   userId    String
@@ -425,6 +436,8 @@ enum NotificationType {
   TASK_ASSIGNED
   TASK_DUE
   TASK_OVERDUE
+  TASK_UPDATED
+  TASK_STATUS
   REMINDER
   REQUEST
   MEETING
