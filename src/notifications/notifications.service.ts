@@ -97,22 +97,39 @@ export class NotificationsService {
       return;
     }
 
+    let createdNotifications = 0;
     for (const user of users) {
       try {
-        await this.db.$transaction(async transaction => {
+        const created = await this.db.$transaction(async transaction => {
           const event = await transaction.notificationEvent.createMany({
             data: [{ userId: user.id, eventKey }],
             skipDuplicates: true,
           });
-          if (event.count) {
-            await transaction.notification.create({
-              data: { ...data, userId: user.id, eventKey },
-            });
+          if (!event.count) {
+            return false;
           }
+          await transaction.notification.create({
+            data: { ...data, userId: user.id, eventKey },
+          });
+          return true;
         });
+        if (created) {
+          createdNotifications += 1;
+        }
       } catch (error) {
         this.logger.error(
           `Unable to persist ${data.type} notification for user ${user.id}`,
+          error instanceof Error ? error.stack : undefined,
+        );
+      }
+    }
+
+    if (createdNotifications) {
+      try {
+        await this.dispatchPendingPushNotifications();
+      } catch (error) {
+        this.logger.error(
+          `Unable to dispatch ${data.type} push notifications immediately`,
           error instanceof Error ? error.stack : undefined,
         );
       }

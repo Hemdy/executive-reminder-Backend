@@ -62,14 +62,16 @@ and event; push deliveries use retryable claims and remove subscriptions that a
 push provider reports as expired. Tapping a push opens the associated item (or
 the relevant list for deleted items).
 
-The protected `GET /api/notifications/push/dispatch` job dispatches queued push
-notifications, due reminders, and meeting reminders scheduled within 15
-minutes. Vercel is configured to call it once per minute. Set `CRON_SECRET` to
-a separate long random value; the endpoint requires the matching bearer token.
+Event notifications created through the shared notification service trigger
+push dispatch immediately; the Cron job remains responsible for scheduled due
+reminders, meeting reminders scheduled within 15 minutes, and retrying queued
+deliveries. The current `vercel.json` schedule calls the protected
+`GET /api/notifications/push/dispatch` endpoint daily at 09:00 UTC, so scheduled
+reminders and retries follow that cadence. Set `CRON_SECRET` to a separate long
+random value; the endpoint requires the matching bearer token.
 `CRON_SECRET` is present in `.env.example` but is not currently configured in
 the local backend `.env`; set it there to test the protected dispatcher locally.
-The deployment plan must support minute-level Vercel Cron jobs and the cron
-must be enabled on the production deployment. Set `REMINDER_TIMEZONE` to the
+The production Cron must be enabled in Vercel. Set `REMINDER_TIMEZONE` to the
 IANA timezone used for reminder and meeting schedule calculations (defaults to
 `Africa/Lagos`).
 
@@ -144,7 +146,7 @@ database connection string or any database password.
 After setting the variables locally, run `npm run prisma:migrate:deploy` once
 with the Production `DIRECT_URL`, optionally run `npm run prisma:seed`, then
 redeploy so the function receives the runtime variables and the production
-deployment activates its once-per-minute cron. Copy the already-generated
+deployment activates its configured cron schedule. Copy the already-generated
 VAPID key pair from secure server-side configuration; do not generate or
 commit another pair. The checked-in Prisma migrations are stored in
 `prisma/migrations`.
