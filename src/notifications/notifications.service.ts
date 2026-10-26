@@ -320,12 +320,19 @@ export class NotificationsService {
           }, payload);
         } catch (error) {
           const statusCode = this.pushErrorStatus(error);
-          if (statusCode === 404 || statusCode === 410) {
+          if (statusCode === 404 || statusCode === 410 || this.isVapidKeyMismatch(error)) {
             await this.db.pushSubscription.deleteMany({ where: { id: subscription.id } });
+            if (this.isVapidKeyMismatch(error)) {
+              this.logger.warn(
+                `Removed push subscription ${subscription.id} because it was created with a different VAPID public key.`,
+              );
+            }
             return;
           }
           retry = true;
-          this.logger.warn(`Push delivery failed for notification ${notification.id}`);
+          this.logger.warn(
+            `Push delivery failed for notification ${notification.id}: ${this.pushErrorDetails(error)}`,
+          );
         }
       }));
 
@@ -535,6 +542,38 @@ export class NotificationsService {
       return typeof status === 'number' ? status : undefined;
     }
     return undefined;
+  }
+
+  private pushErrorDetails(error: unknown): string {
+    const statusCode = this.pushErrorStatus(error);
+    const message = error instanceof Error ? error.message : 'Unknown push provider error';
+    const body =
+      typeof error === 'object' && error !== null && 'body' in error && typeof error.body === 'string'
+        ? error.body.replace(/\s+/g, ' ').slice(0, 500)
+        : undefined;
+    return [
+      statusCode === undefined ? undefined : `HTTP ${statusCode}`,
+      message,
+      body ? `Provider response: ${body}` : undefined,
+    ].filter(Boolean).join('; ');
+  }
+
+  private isVapidKeyMismatch(error: unknown): boolean {
+    if (typeof error !== 'object' || error === null || !('body' in error)) {
+      return false;
+    }
+
+    const body = error.body;
+    if (typeof body !== 'string') {
+      return false;
+    }
+
+    try {
+      const response = JSON.parse(body) as { reason?: unknown };
+      return response.reason === 'VapidPkHashMismatch';
+    } catch {
+      return false;
+    }
   }
 
   private isPushServiceEndpoint(endpoint: string): boolean {
