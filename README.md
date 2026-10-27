@@ -122,6 +122,8 @@ Preview, and Development environments as appropriate:
 - `JWT_SECRET`: a long, random secret used to sign access tokens.
 - `JWT_EXPIRES_IN`: optional token lifetime such as `1d`.
 - `FRONTEND_ORIGIN`: the deployed frontend origin, including its scheme.
+  For example, use `https://executive-reminder-frontend.vercel.app` with no
+  trailing path; separate multiple allowed origins with commas.
 - `SUPABASE_URL`: the Supabase project URL used for private file storage.
 - `SUPABASE_SERVICE_ROLE_KEY`: a backend-only service-role key for private
   Storage access; never expose it to the frontend.
@@ -135,6 +137,11 @@ Preview, and Development environments as appropriate:
   push/reminder dispatch endpoint.
 - `REMINDER_TIMEZONE`: optional IANA timezone for scheduled reminder and
   meeting calculations (defaults to `Africa/Lagos`).
+
+The Vercel handler answers valid CORS preflight requests without starting Nest
+or connecting to the database. Login and other API operations still require a
+reachable production `DATABASE_URL`; check the Vercel function logs and
+Supabase pooler availability if those requests return 503 or 504 responses.
 
 Copy the connection strings from Supabase Dashboard → Connect. The Supabase
 project URL and publishable key you provided are not used by this Prisma
