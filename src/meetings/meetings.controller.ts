@@ -4,6 +4,7 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   Param,
   Patch,
   Post,
@@ -18,6 +19,7 @@ import { MeetingStatus, MeetingType } from '@prisma/client';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { extname } from 'node:path';
 import type { Response } from 'express';
+import { sendAttachment } from '../common/attachment-response';
 import { Permissions } from '../common/decorators';
 import { JwtAuthGuard, PermissionsGuard } from '../common/guards';
 import { MeetingsService } from './meetings.service';
@@ -68,8 +70,9 @@ export class MeetingsController {
   @Get(':id') get(@Param('id') id: string, @Req() req: any) { return this.service.get(id, req.user.id); }
   @Get(':id/comments') comments(@Param('id') id: string, @Req() req: any) { return this.service.listComments(id, req.user.id); }
   @Post(':id/comments') addComment(@Param('id') id: string, @Body() dto: MeetingCommentDto, @Req() req: any) { return this.service.addComment(id, req.user.id, dto.body); }
-  @Get(':id/attachments') attachments(@Param('id') id: string, @Req() req: any) { return this.service.listAttachments(id, req.user.id); }
+  @Get(':id/attachments') @Header('Cache-Control', 'private, no-store') attachments(@Param('id') id: string, @Req() req: any) { return this.service.listAttachments(id, req.user.id); }
   @Post(':id/attachments')
+  @Header('Cache-Control', 'private, no-store')
   @UseInterceptors(FileInterceptor('file', {
     limits: { fileSize: 4 * 1024 * 1024 },
     fileFilter: (_request, file, callback) => {
@@ -96,12 +99,7 @@ export class MeetingsController {
     @Res() response: Response,
   ) {
     const attachment = await this.service.getAttachment(meetingId, attachmentId, req.user.id);
-    const asciiFileName = attachment.fileName.replace(/[\r\n"]/g, '_').replace(/[^\x20-\x7e]/g, '_');
-    response.setHeader('Content-Disposition', `attachment; filename="${asciiFileName}"; filename*=UTF-8''${encodeURIComponent(attachment.fileName)}`);
-    response.setHeader('Content-Type', attachment.mimeType);
-    response.setHeader('Content-Length', attachment.size);
-    response.setHeader('X-Content-Type-Options', 'nosniff');
-    response.send(attachment.content);
+    sendAttachment(response, attachment);
   }
   @Patch(':id') @Permissions('meetings:write') update(@Param('id') id: string, @Body() dto: UpdateMeetingDto, @Req() req: any) { return this.service.update(id, dto, req.user.id); }
   @Patch(':id/status') @Permissions('meetings:write') status(@Param('id') id: string, @Body() dto: MeetingStatusDto, @Req() req: any) { return this.service.status(id, dto.status, req.user.id); }

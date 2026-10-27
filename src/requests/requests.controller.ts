@@ -4,6 +4,7 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   Param,
   Patch,
   Post,
@@ -18,6 +19,7 @@ import { Priority, RequestStatus, RequestType } from '@prisma/client';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { extname } from 'node:path';
 import type { Response } from 'express';
+import { sendAttachment } from '../common/attachment-response';
 import { Permissions } from '../common/decorators';
 import { JwtAuthGuard, PermissionsGuard } from '../common/guards';
 import { RequestsService } from './requests.service';
@@ -72,8 +74,9 @@ export class RequestsController {
 
   @Get(':id/comments') comments(@Param('id') id: string, @Req() req: any) { return this.s.listComments(id, req.user.id); }
   @Post(':id/comments') addComment(@Param('id') id: string, @Body() dto: RequestCommentDto, @Req() req: any) { return this.s.addComment(id, req.user.id, dto.body); }
-  @Get(':id/attachments') attachments(@Param('id') id: string, @Req() req: any) { return this.s.listAttachments(id, req.user.id); }
+  @Get(':id/attachments') @Header('Cache-Control', 'private, no-store') attachments(@Param('id') id: string, @Req() req: any) { return this.s.listAttachments(id, req.user.id); }
   @Post(':id/attachments')
+  @Header('Cache-Control', 'private, no-store')
   @UseInterceptors(FileInterceptor('file', {
     limits: { fileSize: 4 * 1024 * 1024 },
     fileFilter: (_request, file, callback) => {
@@ -101,12 +104,7 @@ export class RequestsController {
     @Res() response: Response,
   ) {
     const attachment = await this.s.getAttachment(requestId, attachmentId, req.user.id);
-    const asciiFileName = attachment.fileName.replace(/[\r\n"]/g, '_').replace(/[^\x20-\x7e]/g, '_');
-    response.setHeader('Content-Disposition', `attachment; filename="${asciiFileName}"; filename*=UTF-8''${encodeURIComponent(attachment.fileName)}`);
-    response.setHeader('Content-Type', attachment.mimeType);
-    response.setHeader('Content-Length', attachment.size);
-    response.setHeader('X-Content-Type-Options', 'nosniff');
-    response.send(attachment.content);
+    sendAttachment(response, attachment);
   }
 
   @Delete(':id') @Permissions('requests:write') remove(@Param('id') id: string, @Req() req: any) { return this.s.remove(id, req.user.id); }
