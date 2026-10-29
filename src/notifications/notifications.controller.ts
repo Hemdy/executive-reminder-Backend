@@ -39,8 +39,9 @@ class PushKeysDto {
 
 class PushSubscriptionDto {
   @IsUrl({ protocols: ['https'], require_protocol: true }) @Length(1, 2048) endpoint!: string;
-  @IsOptional() @IsInt() expirationTime?: number | null;
+  @IsOptional() expirationTime?: number | null;
   @ValidateNested() @Type(() => PushKeysDto) keys!: PushKeysDto;
+  @IsOptional() options?: Record<string, any>;
 }
 
 class RemovePushSubscriptionDto {
@@ -56,6 +57,7 @@ class NotificationDto {
   @IsOptional() @IsString() referenceId?: string;
   @IsOptional() @IsString() resourceType?: string;
   @IsOptional() @IsString() route?: string;
+  @IsOptional() @IsString() recipientId?: string;
 }
 
 class PushPreferencesDto {
@@ -128,8 +130,21 @@ export class NotificationsController {
 
   @Post()
   @Permissions('notifications:write')
-  create(@Body() dto: NotificationDto, @Req() request: any) {
-    return this.service.create(dto, request.user.id);
+  async create(@Body() dto: NotificationDto, @Req() request: any) {
+    const recipientId = dto.recipientId || request.user.id;
+    await this.service.dispatchNotification({
+      title: dto.title,
+      message: dto.message,
+      type: dto.type,
+      priority: dto.priority,
+      actorId: dto.recipientId ? request.user.id : undefined,
+      recipientIds: [recipientId],
+      sourceId: dto.sourceId,
+      referenceId: dto.referenceId,
+      resourceType: dto.resourceType,
+      route: dto.route,
+    });
+    return { success: true };
   }
 
   @Patch(':id/read')

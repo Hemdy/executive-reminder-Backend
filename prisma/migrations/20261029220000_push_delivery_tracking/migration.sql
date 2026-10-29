@@ -34,3 +34,4 @@ CREATE INDEX "PushDeliveryLog_createdAt_idx" ON "PushDeliveryLog"("createdAt");
 
 -- AddForeignKey
 ALTER TABLE "PushDeliveryLog" ADD CONSTRAINT "PushDeliveryLog_notificationId_fkey" FOREIGN KEY ("notificationId") REFERENCES "Notification"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+

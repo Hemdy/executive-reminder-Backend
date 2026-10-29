@@ -17,7 +17,21 @@ import webPush from 'web-push';
 import { PrismaService } from '../prisma.service';
 import { PushJob, PushQueueService, QueueStats } from './push-queue.service';
 
-interface NotificationEvent {
+export interface DispatchNotificationInput {
+  title: string;
+  message: string;
+  type: NotificationType;
+  priority?: Priority;
+  actorId?: string;
+  recipientIds: string[];
+  sourceId?: string;
+  referenceId?: string;
+  resourceType?: string;
+  route?: string;
+  eventKey?: string;
+}
+
+export interface LegacyNotificationEvent {
   title: string;
   message: string;
   type: NotificationType;
@@ -32,6 +46,7 @@ interface PushSubscriptionInput {
   endpoint: string;
   expirationTime?: number | null;
   keys: { p256dh: string; auth: string };
+  options?: Record<string, any>;
 }
 
 export interface PushPreferences {
@@ -84,6 +99,100 @@ export class NotificationsService {
     return this.db.notification.findMany({ where: { userId }, orderBy: { createdAt: 'desc' } });
   }
 
+  // Canonical notification and push dispatcher
+  async dispatchNotification(input: DispatchNotificationInput): Promise<void> {
+    const {
+      title,
+      message,
+      type,
+      priority = Priority.MEDIUM,
+      actorId,
+      recipientIds,
+      sourceId,
+      referenceId,
+      resourceType,
+      route,
+      eventKey: customEventKey,
+    } = input;
+
+    // 1. Exclude the actor who triggered the action and deduplicate
+    const targetIds = [...new Set(recipientIds)].filter(id => Boolean(id) && id !== actorId);
+    if (targetIds.length === 0) {
+      return;
+    }
+
+    // 2. Resolve active recipients in the database
+    let users: { id: string }[];
+    try {
+      users = await this.db.user.findMany({
+        where: { id: { in: targetIds }, isActive: true },
+        select: { id: true },
+      });
+    } catch (error) {
+      this.logger.error(
+        `Unable to resolve recipients for ${type} notification`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      return;
+    }
+
+    if (users.length === 0) {
+      return;
+    }
+
+    const defaultEventKey =
+      customEventKey ||
+      `${type.toLowerCase()}:${resourceType || 'event'}:${referenceId || sourceId || 'general'}:${Date.now()}`;
+    const createdNotificationIds: string[] = [];
+
+    // 3. Atomically create NotificationEvent and Notification for each recipient
+    for (const user of users) {
+      try {
+        const created = await this.db.$transaction(async transaction => {
+          const event = await transaction.notificationEvent.createMany({
+            data: [{ userId: user.id, eventKey: defaultEventKey }],
+            skipDuplicates: true,
+          });
+          if (!event.count) {
+            return null;
+          }
+          return transaction.notification.create({
+            data: {
+              title,
+              message,
+              type,
+              priority,
+              userId: user.id,
+              eventKey: defaultEventKey,
+              sourceId,
+              referenceId,
+              resourceType,
+              route,
+            },
+            select: { id: true, userId: true },
+          });
+        });
+
+        if (created) {
+          createdNotificationIds.push(created.id);
+          // 4. Enqueue to Redis queue
+          await this.queueService.enqueue(created.id);
+        }
+      } catch (error) {
+        this.logger.error(
+          `Unable to persist ${type} notification for user ${user.id}`,
+          error instanceof Error ? error.stack : undefined,
+        );
+      }
+    }
+
+    // 5. Trigger immediate non-blocking queue worker
+    if (createdNotificationIds.length > 0) {
+      this.triggerImmediateWorker();
+    }
+  }
+
+  // Backward compatibility alias for single notification creation
   create(
     data: {
       title: string;
@@ -94,68 +203,44 @@ export class NotificationsService {
       referenceId?: string;
       resourceType?: string;
       route?: string;
+      actorId?: string;
     },
     userId: string,
   ) {
-    return this.db.notification.create({
-      data: { ...data, userId, type: data.type as never, priority: data.priority as never },
+    return this.dispatchNotification({
+      title: data.title,
+      message: data.message,
+      type: data.type as NotificationType,
+      priority: (data.priority as Priority) || Priority.MEDIUM,
+      actorId: data.actorId,
+      recipientIds: [userId],
+      sourceId: data.sourceId,
+      referenceId: data.referenceId,
+      resourceType: data.resourceType,
+      route: data.route,
     });
   }
 
+  // Backward compatibility alias for existing service callers
   async createForUsers(
-    data: NotificationEvent,
+    data: LegacyNotificationEvent,
     recipientIds: string[],
     eventKey: string,
+    actorId?: string,
   ): Promise<void> {
-    let users: { id: string }[];
-    try {
-      users = await this.db.user.findMany({
-        where: { id: { in: [...new Set(recipientIds)] }, isActive: true },
-        select: { id: true },
-      });
-    } catch (error) {
-      this.logger.error(
-        `Unable to resolve recipients for ${data.type} notification`,
-        error instanceof Error ? error.stack : undefined,
-      );
-      return;
-    }
-
-    const createdNotificationIds: string[] = [];
-
-    for (const user of users) {
-      try {
-        const created = await this.db.$transaction(async transaction => {
-          const event = await transaction.notificationEvent.createMany({
-            data: [{ userId: user.id, eventKey }],
-            skipDuplicates: true,
-          });
-          if (!event.count) {
-            return null;
-          }
-          return transaction.notification.create({
-            data: { ...data, userId: user.id, eventKey },
-            select: { id: true, userId: true },
-          });
-        });
-
-        if (created) {
-          createdNotificationIds.push(created.id);
-          // Enqueue directly to the Redis event queue
-          await this.queueService.enqueue(created.id);
-        }
-      } catch (error) {
-        this.logger.error(
-          `Unable to persist ${data.type} notification for user ${user.id}`,
-          error instanceof Error ? error.stack : undefined,
-        );
-      }
-    }
-
-    if (createdNotificationIds.length > 0) {
-      // Trigger non-blocking immediate queue worker
-      this.triggerImmediateWorker();
-    }
+    return this.dispatchNotification({
+      title: data.title,
+      message: data.message,
+      type: data.type,
+      priority: data.priority,
+      actorId,
+      recipientIds,
+      sourceId: data.sourceId,
+      referenceId: data.referenceId,
+      resourceType: data.resourceType,
+      route: data.route,
+      eventKey,
+    });
   }
 
   private triggerImmediateWorker(): void {
@@ -781,21 +866,12 @@ export class NotificationsService {
   }
 
   private isPushServiceEndpoint(endpoint: string): boolean {
-    let hostname: string;
     try {
       const url = new URL(endpoint);
-      if (url.protocol !== 'https:') {
-        return false;
-      }
-      hostname = url.hostname.toLowerCase();
+      return url.protocol === 'https:';
     } catch {
       return false;
     }
-    return hostname === 'fcm.googleapis.com' ||
-      hostname.endsWith('.push.services.mozilla.com') ||
-      hostname.endsWith('.push.apple.com') ||
-      hostname.endsWith('.notify.windows.com') ||
-      hostname.endsWith('.wns.windows.com');
   }
 
   setRead(id: string, userId: string, isRead: boolean) {

@@ -139,3 +139,4 @@ All delivery outcomes are recorded in the `PushDeliveryLog` database table. You 
    - **Foreground:** App active &rarr; banner shows heads-up notification.
    - **Background:** App minimized &rarr; heads-up notification appears in system tray.
    - **Killed (Doze mode):** Swipe app away, lock the phone for 5 minutes &rarr; trigger notification &rarr; device screen lights up with high-priority FCM notification.
+

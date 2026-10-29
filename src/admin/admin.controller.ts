@@ -6,8 +6,9 @@ import {
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import * as bcrypt from 'bcrypt';
-import { Prisma } from '@prisma/client';
+import { NotificationType, Priority, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { Permissions } from '../common/decorators';
 import { JwtAuthGuard, PermissionsGuard } from '../common/guards';
 
@@ -69,7 +70,10 @@ const userSelect = {
 @Controller(['admin', ''])
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 export class AdminController {
-  constructor(private readonly db: PrismaService) {}
+  constructor(
+    private readonly db: PrismaService,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   @Get('users')
   @Permissions('users:view')
@@ -92,7 +96,7 @@ export class AdminController {
     const { password, roleId, ...data } = dto;
     const role = await this.resolveRole(roleId, dto.role);
     try {
-      return await this.db.user.create({
+      const newUser = await this.db.user.create({
         data: {
           ...data,
           email: data.email.trim().toLowerCase(),
@@ -102,6 +106,17 @@ export class AdminController {
         },
         select: userSelect,
       });
+
+      await this.notifications.dispatchNotification({
+        title: 'Welcome to Executive Reminder',
+        message: `Your account has been created with the ${role.name} role.`,
+        type: NotificationType.SYSTEM,
+        priority: Priority.HIGH,
+        recipientIds: [newUser.id],
+        route: '/dashboard',
+      });
+
+      return newUser;
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
         throw new ConflictException('A user with this email address already exists');
@@ -125,13 +140,13 @@ export class AdminController {
   @Patch('users/:id')
   @Permissions('users:edit')
   async updateUser(@Param('id') id: string, @Body() dto: UpdateUserDto) {
-    await this.requireUser(id);
+    const existingUser = await this.requireUser(id);
     const { password, roleId, ...data } = dto;
     const role = dto.role !== undefined || roleId !== undefined
       ? await this.resolveRole(roleId, dto.role)
       : undefined;
     try {
-      return await this.db.user.update({
+      const updatedUser = await this.db.user.update({
         where: { id },
         data: {
           ...data,
@@ -144,6 +159,19 @@ export class AdminController {
         },
         select: userSelect,
       });
+
+      if (role && role.name !== existingUser.role) {
+        await this.notifications.dispatchNotification({
+          title: 'Account Role Updated',
+          message: `Your role has been updated from ${existingUser.role} to ${role.name}.`,
+          type: NotificationType.SYSTEM,
+          priority: Priority.HIGH,
+          recipientIds: [id],
+          route: '/dashboard',
+        });
+      }
+
+      return updatedUser;
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
         throw new ConflictException('A user with this email address already exists');
@@ -157,7 +185,18 @@ export class AdminController {
   @Permissions('users:edit')
   async setUserActive(@Param('id') id: string, @Body() dto: ActiveDto) {
     await this.requireUser(id);
-    return this.db.user.update({ where: { id }, data: { isActive: dto.isActive }, select: userSelect });
+    const updated = await this.db.user.update({ where: { id }, data: { isActive: dto.isActive }, select: userSelect });
+    if (dto.isActive) {
+      await this.notifications.dispatchNotification({
+        title: 'Account Re-activated',
+        message: 'Your account has been re-activated by an administrator.',
+        type: NotificationType.SYSTEM,
+        priority: Priority.HIGH,
+        recipientIds: [id],
+        route: '/dashboard',
+      });
+    }
+    return updated;
   }
 
   @Delete('users/:id')
