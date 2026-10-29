@@ -1,7 +1,5 @@
 import {
   BadRequestException,
-  ConflictException,
-  ForbiddenException,
   Injectable,
   Logger,
 } from '@nestjs/common';
@@ -61,6 +59,7 @@ export class NotificationsService {
   private readonly logger = new Logger(NotificationsService.name);
   private readonly vapidPublicKey: string;
   private vapidConfigured: boolean;
+  private vapidStatusReason: string | null = null;
   private readonly reminderTimezone: string;
   private readonly frontendBaseUrl: string;
   private lastDueCheckTimestamp = 0;
@@ -71,31 +70,47 @@ export class NotificationsService {
     private readonly queueService: PushQueueService,
     private readonly config: ConfigService,
   ) {
-    this.vapidPublicKey = config.get<string>('VAPID_PUBLIC_KEY') ?? '';
-    const vapidPrivateKey = config.get<string>('VAPID_PRIVATE_KEY') ?? '';
-    const vapidSubject = config.get<string>('VAPID_SUBJECT') ?? '';
-    this.vapidConfigured = Boolean(this.vapidPublicKey && vapidPrivateKey && vapidSubject);
-    this.reminderTimezone = config.get<string>('REMINDER_TIMEZONE') ?? 'Africa/Lagos';
+    // Normalise env values: dashboards often keep surrounding quotes/whitespace when pasted.
+    const clean = (value?: string) => (value ?? '').trim().replace(/^['"]|['"]$/g, '').trim();
+    this.vapidPublicKey = clean(config.get<string>('VAPID_PUBLIC_KEY'));
+    const vapidPrivateKey = clean(config.get<string>('VAPID_PRIVATE_KEY'));
+    let vapidSubject = clean(config.get<string>('VAPID_SUBJECT'));
+    if (vapidSubject && !/^(mailto:|https?:\/\/)/i.test(vapidSubject) && vapidSubject.includes('@')) {
+      vapidSubject = `mailto:${vapidSubject}`;
+    }
+    this.reminderTimezone = clean(config.get<string>('REMINDER_TIMEZONE')) || 'Africa/Lagos';
 
-    const origin = config.get<string>('FRONTEND_ORIGIN') ?? 'https://executive-reminder-frontend.vercel.app';
-    this.frontendBaseUrl = origin.split(',')[0].trim().replace(/\/+$/, '');
+    const origin = clean(config.get<string>('FRONTEND_ORIGIN')) || 'https://executive-reminder-frontend.vercel.app';
+    this.frontendBaseUrl = clean(origin.split(',')[0]).replace(/\/+$/, '');
+
+    const missing = [
+      !this.vapidPublicKey && 'VAPID_PUBLIC_KEY',
+      !vapidPrivateKey && 'VAPID_PRIVATE_KEY',
+      !vapidSubject && 'VAPID_SUBJECT',
+    ].filter(Boolean);
+    this.vapidConfigured = missing.length === 0;
+    this.vapidStatusReason = missing.length ? `Missing environment variables: ${missing.join(', ')}` : null;
 
     if (this.vapidConfigured) {
       try {
         webPush.setVapidDetails(vapidSubject, this.vapidPublicKey, vapidPrivateKey);
+        this.logger.log(`Web push enabled (public key ${this.vapidPublicKey.slice(0, 8)}…)`);
       } catch (error) {
         this.vapidConfigured = false;
+        this.vapidStatusReason = `Invalid VAPID configuration: ${error instanceof Error ? error.message : 'unknown error'}`;
         this.logger.error(
           'Failed to configure VAPID details. Push notifications will be unavailable until valid keys are configured.',
           error instanceof Error ? error.stack : undefined,
         );
       }
+    } else {
+      this.logger.warn(`Web push disabled. ${this.vapidStatusReason}`);
     }
   }
 
-  list(userId: string) {
-    // Opportunistically check due reminders and meetings on user activity (throttled to 60s)
-    this.checkDueRemindersThrottled();
+  async list(userId: string) {
+    // Opportunistically check due reminders/meetings and drain any due retry jobs (throttled to 60s)
+    await this.checkDueRemindersThrottled();
     return this.db.notification.findMany({ where: { userId }, orderBy: { createdAt: 'desc' } });
   }
 
@@ -175,8 +190,6 @@ export class NotificationsService {
 
         if (created) {
           createdNotificationIds.push(created.id);
-          // 4. Enqueue to Redis queue
-          await this.queueService.enqueue(created.id);
         }
       } catch (error) {
         this.logger.error(
@@ -186,10 +199,40 @@ export class NotificationsService {
       }
     }
 
-    // 5. Trigger immediate non-blocking queue worker
+    // 4. Deliver pushes before returning. On Vercel the function is frozen as soon as the
+    //    response is sent, so fire-and-forget work (setImmediate) silently never runs.
+    //    Retryable failures are handed to the Redis retry queue inside processJob.
     if (createdNotificationIds.length > 0) {
-      this.triggerImmediateWorker();
+      await this.deliverNow(createdNotificationIds);
     }
+  }
+
+  private async deliverNow(notificationIds: string[]): Promise<void> {
+    if (!this.vapidConfigured) {
+      this.logger.warn(
+        `Skipping push for ${notificationIds.length} notification(s): ${this.vapidStatusReason}`,
+      );
+      return;
+    }
+    await Promise.all(
+      notificationIds.map(async notificationId => {
+        try {
+          await this.processJob({
+            id: `inline_${notificationId}`,
+            notificationId,
+            attempt: 0,
+            maxAttempts: 3,
+            createdAt: Date.now(),
+          });
+        } catch (error) {
+          this.logger.error(
+            `Inline push delivery crashed for ${notificationId}; queuing for retry`,
+            error instanceof Error ? error.stack : undefined,
+          );
+          await this.queueService.enqueue(notificationId).catch(() => undefined);
+        }
+      }),
+    );
   }
 
   // Backward compatibility alias for single notification creation
@@ -240,17 +283,6 @@ export class NotificationsService {
       resourceType: data.resourceType,
       route: data.route,
       eventKey,
-    });
-  }
-
-  private triggerImmediateWorker(): void {
-    // Use setImmediate to process asynchronously without blocking the user request
-    setImmediate(async () => {
-      try {
-        await this.processQueue();
-      } catch (err) {
-        this.logger.error('Background push queue processing error', err);
-      }
     });
   }
 
@@ -365,14 +397,12 @@ export class NotificationsService {
           return;
         }
 
+        // Standard Web Push headers only (RFC 8030). TTL + Urgency are honoured by FCM,
+        // Apple (web.push.apple.com) and Mozilla; vendor-specific apns-* headers are not
+        // part of Web Push and risk rejection by non-Apple push services.
         const requestOptions: webPush.RequestOptions = {
           TTL: 86400, // 24 hours
           urgency: 'high',
-          headers: {
-            'apns-push-type': 'alert',
-            'apns-priority': '10',
-            'apns-expiration': String(Math.floor(Date.now() / 1000) + 86400),
-          },
         };
 
         try {
@@ -531,73 +561,118 @@ export class NotificationsService {
   }
 
   pushConfig() {
-    return { enabled: this.vapidConfigured, publicKey: this.vapidConfigured ? this.vapidPublicKey : null };
+    return {
+      enabled: this.vapidConfigured,
+      publicKey: this.vapidConfigured ? this.vapidPublicKey : null,
+      // Non-secret diagnostic so a disabled server is debuggable from the browser.
+      reason: this.vapidConfigured ? null : this.vapidStatusReason,
+    };
   }
 
   async savePushSubscription(userId: string, input: PushSubscriptionInput): Promise<void> {
     if (!this.isPushServiceEndpoint(input.endpoint)) {
       throw new BadRequestException('The push service endpoint is not supported');
     }
-    const existing = await this.db.pushSubscription.findUnique({
-      where: { endpoint: input.endpoint },
-      select: { userId: true },
-    });
-    if (existing && existing.userId !== userId) {
-      throw new ForbiddenException('This push subscription belongs to another user');
-    }
 
     const subscriptionData = {
+      userId,
       p256dh: input.keys.p256dh,
       auth: input.keys.auth,
       expirationTime: input.expirationTime == null ? null : BigInt(input.expirationTime),
     };
-    if (existing) {
-      const updated = await this.db.pushSubscription.updateMany({
-        where: { endpoint: input.endpoint, userId },
-        data: subscriptionData,
-      });
-      if (!updated.count) {
-        const current = await this.db.pushSubscription.findUnique({
-          where: { endpoint: input.endpoint },
-          select: { userId: true },
-        });
-        if (current?.userId !== undefined && current.userId !== userId) {
-          throw new ForbiddenException('This push subscription belongs to another user');
-        }
-        if (current) {
-          throw new ConflictException('The push subscription changed while saving; retry the request');
-        }
-        await this.db.pushSubscription.create({
-          data: { ...subscriptionData, userId, endpoint: input.endpoint },
-        });
-      }
-      return;
-    }
-    await this.db.pushSubscription.create({
-      data: { ...subscriptionData, userId, endpoint: input.endpoint },
+
+    // Reassign endpoint to the currently authenticated user holding the browser's p256dh/auth keys
+    // so switching accounts on the same iOS/Android/desktop device works seamlessly without 403s
+    // and prevents notifications for a previous account from leaking to the active session.
+    await this.db.pushSubscription.upsert({
+      where: { endpoint: input.endpoint },
+      update: subscriptionData,
+      create: { ...subscriptionData, endpoint: input.endpoint },
     });
+  }
+
+  async sendTestPush(userId: string, delaySeconds = 0) {
+    if (!this.vapidConfigured) {
+      throw new BadRequestException(
+        `Push notifications are not configured on the server yet${this.vapidStatusReason ? ` (${this.vapidStatusReason})` : ''}.`,
+      );
+    }
+
+    const subscriptions = await this.db.pushSubscription.findMany({
+      where: { userId },
+      select: { id: true, endpoint: true },
+    });
+
+    if (subscriptions.length === 0) {
+      throw new BadRequestException(
+        'No active push subscription found for your account. Enable device notifications first.',
+      );
+    }
+
+    const safeDelay = Math.max(0, Math.min(Math.floor(delaySeconds || 0), 6));
+    if (safeDelay > 0) {
+      await new Promise(resolve => setTimeout(resolve, safeDelay * 1000));
+    }
+
+    const eventKey = `system:push_test:${userId}:${Date.now()}`;
+    const notification = await this.db.notification.create({
+      data: {
+        title: 'Push notifications active',
+        message:
+          safeDelay > 0
+            ? 'Background tray delivery verified on your device.'
+            : 'Real-time native tray notifications are working on this device.',
+        type: NotificationType.SYSTEM,
+        priority: Priority.HIGH,
+        userId,
+        eventKey,
+        resourceType: 'system',
+        route: '/notifications',
+      },
+      select: { id: true },
+    });
+
+    await this.deliverNow([notification.id]);
+
+    const deliveries = await this.db.pushDeliveryLog.findMany({
+      where: { notificationId: notification.id },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        deviceType: true,
+        status: true,
+        httpStatus: true,
+        errorDetails: true,
+      },
+    });
+
+    return {
+      sent: deliveries.some(d => d.status === PushDeliveryStatus.SENT),
+      notificationId: notification.id,
+      deviceCount: subscriptions.length,
+      deliveries,
+    };
   }
 
   async removePushSubscription(userId: string, endpoint: string): Promise<void> {
     await this.db.pushSubscription.deleteMany({ where: { userId, endpoint } });
   }
 
-  // Self-healing check for due reminders and meetings on user activity, throttled to 60s
-  private checkDueRemindersThrottled(): void {
+  // Self-healing check for due reminders and meetings on user activity, throttled to 60s.
+  // Awaited (not fire-and-forget) so it completes before Vercel freezes the function.
+  private async checkDueRemindersThrottled(): Promise<void> {
     const now = Date.now();
     if (now - this.lastDueCheckTimestamp < 60_000) {
       return;
     }
     this.lastDueCheckTimestamp = now;
 
-    setImmediate(async () => {
-      try {
-        await this.dispatchDueReminders();
-        await this.dispatchDueMeetingReminders();
-      } catch (err) {
-        this.logger.error('Throttled due reminders check error', err);
-      }
-    });
+    try {
+      await this.dispatchDueReminders();
+      await this.dispatchDueMeetingReminders();
+      await this.processQueue(10);
+    } catch (err) {
+      this.logger.error('Throttled due reminders check error', err);
+    }
   }
 
   async dispatchDueReminders(now = new Date()): Promise<number> {

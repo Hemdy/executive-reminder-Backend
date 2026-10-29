@@ -37,9 +37,10 @@ export class PushQueueService implements OnModuleDestroy {
   private readonly LOCK_PREFIX = 'push:lock:';
 
   constructor(private readonly config: ConfigService) {
-    const upstashUrl = this.config.get<string>('UPSTASH_REDIS_REST_URL');
-    const upstashToken = this.config.get<string>('UPSTASH_REDIS_REST_TOKEN');
-    const redisUrl = this.config.get<string>('REDIS_URL');
+    const clean = (value?: string) => (value ?? '').trim().replace(/^['"]|['"]$/g, '').trim();
+    const upstashUrl = clean(this.config.get<string>('UPSTASH_REDIS_REST_URL'));
+    const upstashToken = clean(this.config.get<string>('UPSTASH_REDIS_REST_TOKEN'));
+    const redisUrl = clean(this.config.get<string>('REDIS_URL'));
 
     if (upstashUrl && upstashToken) {
       try {
@@ -58,7 +59,7 @@ export class PushQueueService implements OnModuleDestroy {
           retryStrategy: times => (times > 3 ? null : Math.min(times * 100, 1000)),
         });
         this.ioredis.connect().catch(err => {
-          this.logger.warn(`Could not connect to Redis at ${redisUrl}, falling back to memory queue: ${err.message}`);
+          this.logger.warn(`Could not connect to configured REDIS_URL, falling back to memory queue: ${err.message}`);
         });
         this.provider = 'redis';
         this.logger.log('PushQueueService initialized with standard Redis (ioredis)');

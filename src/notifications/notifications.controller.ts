@@ -67,6 +67,10 @@ class PushPreferencesDto {
   @IsOptional() @IsBoolean() meetings?: boolean;
 }
 
+class TestPushDto {
+  @IsOptional() @IsInt() delaySeconds?: number;
+}
+
 @Controller('notifications')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 export class NotificationsController {
@@ -95,6 +99,11 @@ export class NotificationsController {
   @Delete('push/subscription')
   removePushSubscription(@Body() dto: RemovePushSubscriptionDto, @Req() request: any) {
     return this.service.removePushSubscription(request.user.id, dto.endpoint);
+  }
+
+  @Post('push/test')
+  sendTestPush(@Body() dto: TestPushDto, @Req() request: any) {
+    return this.service.sendTestPush(request.user.id, dto?.delaySeconds ?? 0);
   }
 
   @Get('push/logs')
