@@ -1,11 +1,12 @@
 import {
-  BadRequestException, Body, Controller, Delete, Get, NotFoundException, Param, Patch, Post, Put, UseGuards,
+  BadRequestException, Body, ConflictException, Controller, Delete, Get, NotFoundException, Param, Patch, Post, Put, UseGuards,
 } from '@nestjs/common';
 import {
   IsArray, IsBoolean, IsEmail, IsNotEmpty, IsOptional, IsString, MinLength, ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import * as bcrypt from 'bcrypt';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 import { Permissions } from '../common/decorators';
 import { JwtAuthGuard, PermissionsGuard } from '../common/guards';
@@ -90,16 +91,23 @@ export class AdminController {
   async user(@Body() dto: UserDto) {
     const { password, roleId, ...data } = dto;
     const role = await this.resolveRole(roleId, dto.role);
-    return this.db.user.create({
-      data: {
-        ...data,
-        email: data.email.trim().toLowerCase(),
-        role: role.name,
-        roleRef: { connect: { id: role.id } },
-        passwordHash: await bcrypt.hash(password, 12),
-      },
-      select: userSelect,
-    });
+    try {
+      return await this.db.user.create({
+        data: {
+          ...data,
+          email: data.email.trim().toLowerCase(),
+          role: role.name,
+          roleRef: { connect: { id: role.id } },
+          passwordHash: await bcrypt.hash(password, 12),
+        },
+        select: userSelect,
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new ConflictException('A user with this email address already exists');
+      }
+      throw error;
+    }
   }
 
   @Post('roles')
@@ -122,19 +130,26 @@ export class AdminController {
     const role = dto.role !== undefined || roleId !== undefined
       ? await this.resolveRole(roleId, dto.role)
       : undefined;
-    return this.db.user.update({
-      where: { id },
-      data: {
-        ...data,
-        ...(data.email ? { email: data.email.trim().toLowerCase() } : {}),
-        ...(password ? { passwordHash: await bcrypt.hash(password, 12) } : {}),
-        ...(role ? {
-          role: role.name,
-          roleRef: { connect: { id: role.id } },
-        } : {}),
-      },
-      select: userSelect,
-    });
+    try {
+      return await this.db.user.update({
+        where: { id },
+        data: {
+          ...data,
+          ...(data.email ? { email: data.email.trim().toLowerCase() } : {}),
+          ...(password ? { passwordHash: await bcrypt.hash(password, 12) } : {}),
+          ...(role ? {
+            role: role.name,
+            roleRef: { connect: { id: role.id } },
+          } : {}),
+        },
+        select: userSelect,
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new ConflictException('A user with this email address already exists');
+      }
+      throw error;
+    }
   }
 
   @Patch('users/:id/active')
