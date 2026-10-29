@@ -4,6 +4,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createECDH } from 'node:crypto';
 import {
   NotificationType,
   Priority,
@@ -57,7 +58,7 @@ export interface PushPreferences {
 @Injectable()
 export class NotificationsService {
   private readonly logger = new Logger(NotificationsService.name);
-  private readonly vapidPublicKey: string;
+  private vapidPublicKey: string;
   private vapidConfigured: boolean;
   private vapidStatusReason: string | null = null;
   private readonly reminderTimezone: string;
@@ -70,10 +71,13 @@ export class NotificationsService {
     private readonly queueService: PushQueueService,
     private readonly config: ConfigService,
   ) {
-    // Normalise env values: dashboards often keep surrounding quotes/whitespace when pasted.
+    // Normalise env values: dashboards often keep surrounding quotes/whitespace or standard base64 padding.
     const clean = (value?: string) => (value ?? '').trim().replace(/^['"]|['"]$/g, '').trim();
-    this.vapidPublicKey = clean(config.get<string>('VAPID_PUBLIC_KEY'));
-    const vapidPrivateKey = clean(config.get<string>('VAPID_PRIVATE_KEY'));
+    const toBase64Url = (value: string) =>
+      value.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+
+    this.vapidPublicKey = toBase64Url(clean(config.get<string>('VAPID_PUBLIC_KEY')));
+    const vapidPrivateKey = toBase64Url(clean(config.get<string>('VAPID_PRIVATE_KEY')));
     let vapidSubject = clean(config.get<string>('VAPID_SUBJECT'));
     if (vapidSubject && !/^(mailto:|https?:\/\/)/i.test(vapidSubject) && vapidSubject.includes('@')) {
       vapidSubject = `mailto:${vapidSubject}`;
@@ -84,7 +88,7 @@ export class NotificationsService {
     this.frontendBaseUrl = clean(origin.split(',')[0]).replace(/\/+$/, '');
 
     const missing = [
-      !this.vapidPublicKey && 'VAPID_PUBLIC_KEY',
+      !this.vapidPublicKey && !vapidPrivateKey && 'VAPID_PUBLIC_KEY',
       !vapidPrivateKey && 'VAPID_PRIVATE_KEY',
       !vapidSubject && 'VAPID_SUBJECT',
     ].filter(Boolean);
@@ -93,6 +97,23 @@ export class NotificationsService {
 
     if (this.vapidConfigured) {
       try {
+        // Verify that VAPID_PUBLIC_KEY mathematically matches VAPID_PRIVATE_KEY on P-256;
+        // web-push only checks byte lengths in setVapidDetails(), so a mismatched pair would
+        // silently fail later at send time with 403 BadJwtToken from APNs / FCM.
+        const curve = createECDH('prime256v1');
+        curve.setPrivateKey(Buffer.from(vapidPrivateKey, 'base64url'));
+        let derivedPub = curve.getPublicKey();
+        if (derivedPub.length < 65) {
+          derivedPub = Buffer.concat([Buffer.alloc(65 - derivedPub.length, 0), derivedPub]);
+        }
+        const derivedPublicKey = derivedPub.toString('base64url');
+        if (this.vapidPublicKey !== derivedPublicKey) {
+          this.logger.warn(
+            'Configured VAPID_PUBLIC_KEY did not match VAPID_PRIVATE_KEY; using derived public key so APNs/FCM ES256 signatures verify.',
+          );
+          this.vapidPublicKey = derivedPublicKey;
+        }
+
         webPush.setVapidDetails(vapidSubject, this.vapidPublicKey, vapidPrivateKey);
         this.logger.log(`Web push enabled (public key ${this.vapidPublicKey.slice(0, 8)}…)`);
       } catch (error) {
