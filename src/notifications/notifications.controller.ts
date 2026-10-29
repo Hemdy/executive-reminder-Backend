@@ -9,15 +9,25 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Req,
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { timingSafeEqual } from 'node:crypto';
-import { IsBoolean, IsEnum, IsInt, IsOptional, IsString, IsUrl, Length, ValidateNested } from 'class-validator';
+import {
+  IsBoolean,
+  IsEnum,
+  IsInt,
+  IsOptional,
+  IsString,
+  IsUrl,
+  Length,
+  ValidateNested,
+} from 'class-validator';
 import { Type } from 'class-transformer';
-import { NotificationType, Priority } from '@prisma/client';
+import { NotificationType, Priority, PushDeliveryStatus } from '@prisma/client';
 import { Permissions } from '../common/decorators';
 import { JwtAuthGuard, PermissionsGuard } from '../common/guards';
 import { NotificationsService } from './notifications.service';
@@ -59,29 +69,93 @@ class PushPreferencesDto {
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 export class NotificationsController {
   constructor(private readonly service: NotificationsService) {}
-  @Get() list(@Req() request: any) { return this.service.list(request.user.id); }
+
+  @Get()
+  list(@Req() request: any) {
+    return this.service.list(request.user.id);
+  }
+
   @Get('push/preferences')
   pushPreferences(@Req() request: any) {
     return this.service.getPushPreferences(request.user.id);
   }
+
   @Patch('push/preferences')
   updatePushPreferences(@Body() dto: PushPreferencesDto, @Req() request: any) {
     return this.service.updatePushPreferences(request.user.id, dto);
   }
+
   @Post('push/subscription')
   savePushSubscription(@Body() dto: PushSubscriptionDto, @Req() request: any) {
     return this.service.savePushSubscription(request.user.id, dto);
   }
+
   @Delete('push/subscription')
   removePushSubscription(@Body() dto: RemovePushSubscriptionDto, @Req() request: any) {
     return this.service.removePushSubscription(request.user.id, dto.endpoint);
   }
-  @Post() @Permissions('notifications:write') create(@Body() dto: NotificationDto, @Req() request: any) { return this.service.create(dto, request.user.id); }
-  @Patch(':id/read') read(@Param('id') id: string, @Req() request: any) { return this.service.setRead(id, request.user.id, true); }
-  @Patch(':id/unread') unread(@Param('id') id: string, @Req() request: any) { return this.service.setRead(id, request.user.id, false); }
-  @Patch('read-all') all(@Req() request: any) { return this.service.markAllRead(request.user.id); }
-  @Delete('read') clearRead(@Req() request: any) { return this.service.clearRead(request.user.id); }
-  @Delete(':id') remove(@Param('id') id: string, @Req() request: any) { return this.service.remove(id, request.user.id); }
+
+  @Get('push/logs')
+  getDeliveryLogs(
+    @Req() request: any,
+    @Query('status') status?: PushDeliveryStatus,
+    @Query('notificationId') notificationId?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const isMasterOrAdmin = ['ADMIN', 'MASTER'].includes(request.user.role);
+    return this.service.getDeliveryLogs({
+      userId: isMasterOrAdmin ? undefined : request.user.id,
+      notificationId,
+      status,
+      limit: limit ? Number(limit) : 50,
+    });
+  }
+
+  @Get('push/queue/stats')
+  getQueueStats() {
+    return this.service.getQueueStats();
+  }
+
+  @Get('push/queue/dlq')
+  getDlqJobs(@Query('limit') limit?: string) {
+    return this.service.getDlqJobs(limit ? Number(limit) : 50);
+  }
+
+  @Post('push/queue/process')
+  processQueue(@Query('limit') limit?: string) {
+    return this.service.processQueue(limit ? Number(limit) : 25);
+  }
+
+  @Post()
+  @Permissions('notifications:write')
+  create(@Body() dto: NotificationDto, @Req() request: any) {
+    return this.service.create(dto, request.user.id);
+  }
+
+  @Patch(':id/read')
+  read(@Param('id') id: string, @Req() request: any) {
+    return this.service.setRead(id, request.user.id, true);
+  }
+
+  @Patch(':id/unread')
+  unread(@Param('id') id: string, @Req() request: any) {
+    return this.service.setRead(id, request.user.id, false);
+  }
+
+  @Patch('read-all')
+  all(@Req() request: any) {
+    return this.service.markAllRead(request.user.id);
+  }
+
+  @Delete('read')
+  clearRead(@Req() request: any) {
+    return this.service.clearRead(request.user.id);
+  }
+
+  @Delete(':id')
+  remove(@Param('id') id: string, @Req() request: any) {
+    return this.service.remove(id, request.user.id);
+  }
 }
 
 @Controller('notifications/push')
@@ -119,7 +193,16 @@ export class PushCronController {
   async dispatch() {
     const dueReminders = await this.service.dispatchDueReminders();
     const dueMeetingReminders = await this.service.dispatchDueMeetingReminders();
-    const deliveredPushes = await this.service.dispatchPendingPushNotifications();
-    return { dueReminders, dueMeetingReminders, deliveredPushes };
+    const queueResult = await this.service.processQueue(50);
+    return { dueReminders, dueMeetingReminders, queueResult };
+  }
+
+  @Get('check-due')
+  @Post('check-due')
+  async checkDue() {
+    const dueReminders = await this.service.dispatchDueReminders();
+    const dueMeetingReminders = await this.service.dispatchDueMeetingReminders();
+    const queueResult = await this.service.processQueue(50);
+    return { dueReminders, dueMeetingReminders, queueResult };
   }
 }

@@ -6,9 +6,16 @@ import {
   Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { NotificationType, Priority, ReminderRecurrence, ReminderStatus } from '@prisma/client';
+import {
+  NotificationType,
+  Priority,
+  PushDeliveryStatus,
+  ReminderRecurrence,
+  ReminderStatus,
+} from '@prisma/client';
 import webPush from 'web-push';
 import { PrismaService } from '../prisma.service';
+import { PushJob, PushQueueService, QueueStats } from './push-queue.service';
 
 interface NotificationEvent {
   title: string;
@@ -40,16 +47,23 @@ export class NotificationsService {
   private readonly vapidPublicKey: string;
   private vapidConfigured: boolean;
   private readonly reminderTimezone: string;
+  private readonly frontendBaseUrl: string;
+  private lastDueCheckTimestamp = 0;
+  private isProcessingQueue = false;
 
   constructor(
     private readonly db: PrismaService,
-    config: ConfigService,
+    private readonly queueService: PushQueueService,
+    private readonly config: ConfigService,
   ) {
     this.vapidPublicKey = config.get<string>('VAPID_PUBLIC_KEY') ?? '';
     const vapidPrivateKey = config.get<string>('VAPID_PRIVATE_KEY') ?? '';
     const vapidSubject = config.get<string>('VAPID_SUBJECT') ?? '';
     this.vapidConfigured = Boolean(this.vapidPublicKey && vapidPrivateKey && vapidSubject);
     this.reminderTimezone = config.get<string>('REMINDER_TIMEZONE') ?? 'Africa/Lagos';
+
+    const origin = config.get<string>('FRONTEND_ORIGIN') ?? 'https://executive-reminder-frontend.vercel.app';
+    this.frontendBaseUrl = origin.split(',')[0].trim().replace(/\/+$/, '');
 
     if (this.vapidConfigured) {
       try {
@@ -65,6 +79,8 @@ export class NotificationsService {
   }
 
   list(userId: string) {
+    // Opportunistically check due reminders and meetings on user activity (throttled to 60s)
+    this.checkDueRemindersThrottled();
     return this.db.notification.findMany({ where: { userId }, orderBy: { createdAt: 'desc' } });
   }
 
@@ -105,7 +121,8 @@ export class NotificationsService {
       return;
     }
 
-    let createdNotifications = 0;
+    const createdNotificationIds: string[] = [];
+
     for (const user of users) {
       try {
         const created = await this.db.$transaction(async transaction => {
@@ -114,15 +131,18 @@ export class NotificationsService {
             skipDuplicates: true,
           });
           if (!event.count) {
-            return false;
+            return null;
           }
-          await transaction.notification.create({
+          return transaction.notification.create({
             data: { ...data, userId: user.id, eventKey },
+            select: { id: true, userId: true },
           });
-          return true;
         });
+
         if (created) {
-          createdNotifications += 1;
+          createdNotificationIds.push(created.id);
+          // Enqueue directly to the Redis event queue
+          await this.queueService.enqueue(created.id);
         }
       } catch (error) {
         this.logger.error(
@@ -132,16 +152,254 @@ export class NotificationsService {
       }
     }
 
-    if (createdNotifications) {
+    if (createdNotificationIds.length > 0) {
+      // Trigger non-blocking immediate queue worker
+      this.triggerImmediateWorker();
+    }
+  }
+
+  private triggerImmediateWorker(): void {
+    // Use setImmediate to process asynchronously without blocking the user request
+    setImmediate(async () => {
       try {
-        await this.dispatchPendingPushNotifications();
-      } catch (error) {
-        this.logger.error(
-          `Unable to dispatch ${data.type} push notifications immediately`,
-          error instanceof Error ? error.stack : undefined,
-        );
+        await this.processQueue();
+      } catch (err) {
+        this.logger.error('Background push queue processing error', err);
+      }
+    });
+  }
+
+  async processQueue(batchSize = 25): Promise<{ processed: number; succeeded: number; failed: number }> {
+    if (this.isProcessingQueue) {
+      return { processed: 0, succeeded: 0, failed: 0 };
+    }
+    this.isProcessingQueue = true;
+
+    let processed = 0;
+    let succeeded = 0;
+    let failed = 0;
+
+    try {
+      while (processed < batchSize) {
+        const job = await this.queueService.popJob();
+        if (!job) {
+          break;
+        }
+
+        processed++;
+        const result = await this.processJob(job);
+        if (result.success) {
+          succeeded++;
+        } else {
+          failed++;
+        }
+      }
+    } finally {
+      this.isProcessingQueue = false;
+    }
+
+    return { processed, succeeded, failed };
+  }
+
+  private async processJob(job: PushJob): Promise<{ success: boolean }> {
+    if (!this.vapidConfigured) {
+      return { success: false };
+    }
+
+    const notification = await this.db.notification.findUnique({
+      where: { id: job.notificationId },
+      include: {
+        user: {
+          include: {
+            pushSubscriptions: true,
+            notificationPreference: true,
+          },
+        },
+      },
+    });
+
+    if (!notification || !notification.user) {
+      return { success: true }; // Notification removed or obsolete
+    }
+
+    // Check user category preferences
+    const preferenceCategory = this.notificationPreferenceCategory(notification);
+    if (preferenceCategory && notification.user.notificationPreference) {
+      const preferences = notification.user.notificationPreference;
+      if (!preferences[preferenceCategory]) {
+        await this.db.notification.update({
+          where: { id: notification.id },
+          data: { pushSentAt: new Date(), pushClaimedAt: null },
+        });
+        return { success: true };
       }
     }
+
+    const subscriptions = notification.user.pushSubscriptions;
+    if (!subscriptions.length) {
+      await this.db.notification.update({
+        where: { id: notification.id },
+        data: { pushSentAt: new Date(), pushClaimedAt: null },
+      });
+      return { success: true };
+    }
+
+    const route = this.notificationRoute(notification);
+    const iconUrl = `${this.frontendBaseUrl}/icons/icon-192x192.png`;
+    const payload = JSON.stringify({
+      notification: {
+        title: notification.title,
+        body: notification.message,
+        icon: iconUrl,
+        badge: iconUrl,
+        tag: notification.id,
+        timestamp: notification.createdAt.getTime(),
+        data: {
+          notificationId: notification.id,
+          route,
+          onActionClick: {
+            default: { operation: 'navigateLastFocusedOrOpen', url: route },
+          },
+        },
+      },
+    });
+
+    let hasRetryableFailure = false;
+    let anyDelivered = false;
+
+    // Send to each subscription with deduplication & APNs/FCM headers
+    await Promise.all(
+      subscriptions.map(async subscription => {
+        const dedupeKey = `${notification.id}:${subscription.endpoint}`;
+        const deviceType = this.detectDeviceType(subscription.endpoint);
+
+        // Check deduplication lock to guarantee idempotency per device
+        const acquired = await this.queueService.acquireLock(dedupeKey, 86400);
+        if (!acquired && job.attempt > 0) {
+          // Already successfully delivered to this endpoint in a prior attempt
+          return;
+        }
+
+        const requestOptions: webPush.RequestOptions = {
+          TTL: 86400, // 24 hours
+          urgency: 'high',
+          headers: {
+            'apns-push-type': 'alert',
+            'apns-priority': '10',
+            'apns-expiration': String(Math.floor(Date.now() / 1000) + 86400),
+          },
+        };
+
+        try {
+          const res = await webPush.sendNotification(
+            {
+              endpoint: subscription.endpoint,
+              keys: { p256dh: subscription.p256dh, auth: subscription.auth },
+            },
+            payload,
+            requestOptions,
+          );
+
+          anyDelivered = true;
+          await this.db.pushDeliveryLog.create({
+            data: {
+              notificationId: notification.id,
+              subscriptionId: subscription.id,
+              userId: notification.userId,
+              endpoint: subscription.endpoint,
+              deviceType,
+              status: PushDeliveryStatus.SENT,
+              attempts: job.attempt + 1,
+              httpStatus: res.statusCode || 201,
+              sentAt: new Date(),
+            },
+          });
+        } catch (error) {
+          const statusCode = this.pushErrorStatus(error);
+
+          // 404, 410 (Gone), or VAPID key mismatch means device unsubscribed or rotated keys
+          if (statusCode === 404 || statusCode === 410 || this.isVapidKeyMismatch(error)) {
+            await this.db.pushSubscription.deleteMany({ where: { id: subscription.id } });
+            await this.db.pushDeliveryLog.create({
+              data: {
+                notificationId: notification.id,
+                subscriptionId: subscription.id,
+                userId: notification.userId,
+                endpoint: subscription.endpoint,
+                deviceType,
+                status: PushDeliveryStatus.FAILED,
+                attempts: job.attempt + 1,
+                httpStatus: statusCode,
+                errorDetails: `Invalid token pruned (${statusCode || 'VapidMismatch'})`,
+              },
+            });
+            await this.queueService.releaseLock(dedupeKey);
+            return;
+          }
+
+          // Retryable error (429 rate limit, 500, network error)
+          hasRetryableFailure = true;
+          await this.queueService.releaseLock(dedupeKey);
+
+          await this.db.pushDeliveryLog.create({
+            data: {
+              notificationId: notification.id,
+              subscriptionId: subscription.id,
+              userId: notification.userId,
+              endpoint: subscription.endpoint,
+              deviceType,
+              status: PushDeliveryStatus.FAILED,
+              attempts: job.attempt + 1,
+              httpStatus: statusCode,
+              errorDetails: this.pushErrorDetails(error),
+            },
+          });
+          this.logger.warn(
+            `Push delivery failed for notification ${notification.id} on ${deviceType}: ${this.pushErrorDetails(error)}`,
+          );
+        }
+      }),
+    );
+
+    if (hasRetryableFailure) {
+      if (job.attempt < job.maxAttempts) {
+        // Exponential backoff: attempt 0 -> 5s, attempt 1 -> 30s, attempt 2 -> 120s
+        const backoffDelays = [5, 30, 120];
+        const delaySeconds = backoffDelays[job.attempt] ?? 120;
+        await this.queueService.scheduleRetry(job, delaySeconds, 'Retryable delivery failure');
+        return { success: false };
+      } else {
+        // Max retries exhausted, send to DLQ
+        await this.queueService.sendToDlq(job, 'Maximum retry attempts (3) exceeded');
+        await this.db.notification.update({
+          where: { id: notification.id },
+          data: { pushClaimedAt: null },
+        });
+        return { success: false };
+      }
+    }
+
+    // Success: mark sent
+    await this.db.notification.update({
+      where: { id: notification.id },
+      data: { pushSentAt: new Date(), pushClaimedAt: null },
+    });
+
+    return { success: true };
+  }
+
+  private detectDeviceType(endpoint: string): 'ios' | 'android' | 'desktop' | 'unknown' {
+    const lower = endpoint.toLowerCase();
+    if (lower.includes('push.apple.com')) {
+      return 'ios';
+    }
+    if (lower.includes('fcm.googleapis.com')) {
+      return 'android';
+    }
+    if (lower.includes('mozilla.com') || lower.includes('windows.com') || lower.includes('wns.')) {
+      return 'desktop';
+    }
+    return 'unknown';
   }
 
   async getPushPreferences(userId: string): Promise<PushPreferences> {
@@ -204,9 +462,9 @@ export class NotificationsService {
     }
 
     const subscriptionData = {
-        p256dh: input.keys.p256dh,
-        auth: input.keys.auth,
-        expirationTime: input.expirationTime == null ? null : BigInt(input.expirationTime),
+      p256dh: input.keys.p256dh,
+      auth: input.keys.auth,
+      expirationTime: input.expirationTime == null ? null : BigInt(input.expirationTime),
     };
     if (existing) {
       const updated = await this.db.pushSubscription.updateMany({
@@ -239,125 +497,22 @@ export class NotificationsService {
     await this.db.pushSubscription.deleteMany({ where: { userId, endpoint } });
   }
 
-  async dispatchPendingPushNotifications(): Promise<number> {
-    if (!this.vapidConfigured) {
-      return 0;
+  // Self-healing check for due reminders and meetings on user activity, throttled to 60s
+  private checkDueRemindersThrottled(): void {
+    const now = Date.now();
+    if (now - this.lastDueCheckTimestamp < 60_000) {
+      return;
     }
+    this.lastDueCheckTimestamp = now;
 
-    const now = new Date();
-    const staleClaim = new Date(now.getTime() - 5 * 60_000);
-    const pending = await this.db.notification.findMany({
-      where: {
-        eventKey: { not: null },
-        isRead: false,
-        pushSentAt: null,
-        pushAttempts: { lt: 5 },
-        OR: [{ pushClaimedAt: null }, { pushClaimedAt: { lt: staleClaim } }],
-      },
-      orderBy: { createdAt: 'asc' },
-      take: 100,
+    setImmediate(async () => {
+      try {
+        await this.dispatchDueReminders();
+        await this.dispatchDueMeetingReminders();
+      } catch (err) {
+        this.logger.error('Throttled due reminders check error', err);
+      }
     });
-    let delivered = 0;
-
-    for (const notification of pending) {
-      const claim = await this.db.notification.updateMany({
-        where: {
-          id: notification.id,
-          pushSentAt: null,
-          isRead: false,
-          pushAttempts: { lt: 5 },
-          OR: [{ pushClaimedAt: null }, { pushClaimedAt: { lt: staleClaim } }],
-        },
-        data: { pushClaimedAt: now, pushAttempts: { increment: 1 } },
-      });
-      if (!claim.count) {
-        continue;
-      }
-
-      const preferenceCategory = this.notificationPreferenceCategory(notification);
-      if (preferenceCategory) {
-        const preferences = await this.db.notificationPreference.findUnique({
-          where: { userId: notification.userId },
-          select: { tasks: true, reminders: true, requests: true, meetings: true },
-        });
-        if (preferences && !preferences[preferenceCategory]) {
-          await this.db.notification.update({
-            where: { id: notification.id },
-            data: { pushSentAt: now, pushClaimedAt: null },
-          });
-          continue;
-        }
-      }
-
-      const subscriptions = await this.db.pushSubscription.findMany({
-        where: { userId: notification.userId },
-      });
-      if (!subscriptions.length) {
-        await this.db.notification.update({
-          where: { id: notification.id },
-          data: { pushSentAt: now, pushClaimedAt: null },
-        });
-        continue;
-      }
-
-      const route = this.notificationRoute(notification);
-      const payload = JSON.stringify({
-        notification: {
-          title: notification.title,
-          body: notification.message,
-          icon: '/icons/icon-192x192.png',
-          badge: '/icons/icon-192x192.png',
-          tag: notification.id,
-          timestamp: notification.createdAt.getTime(),
-          data: {
-            notificationId: notification.id,
-            route,
-            onActionClick: {
-              default: { operation: 'navigateLastFocusedOrOpen', url: route },
-            },
-          },
-        },
-      });
-      let retry = false;
-
-      await Promise.all(subscriptions.map(async subscription => {
-        try {
-          await webPush.sendNotification({
-            endpoint: subscription.endpoint,
-            keys: { p256dh: subscription.p256dh, auth: subscription.auth },
-          }, payload);
-        } catch (error) {
-          const statusCode = this.pushErrorStatus(error);
-          if (statusCode === 404 || statusCode === 410 || this.isVapidKeyMismatch(error)) {
-            await this.db.pushSubscription.deleteMany({ where: { id: subscription.id } });
-            if (this.isVapidKeyMismatch(error)) {
-              this.logger.warn(
-                `Removed push subscription ${subscription.id} because it was created with a different VAPID public key.`,
-              );
-            }
-            return;
-          }
-          retry = true;
-          this.logger.warn(
-            `Push delivery failed for notification ${notification.id}: ${this.pushErrorDetails(error)}`,
-          );
-        }
-      }));
-
-      const exhausted = notification.pushAttempts + 1 >= 5;
-      await this.db.notification.update({
-        where: { id: notification.id },
-        data: {
-          pushClaimedAt: null,
-          ...(!retry || exhausted ? { pushSentAt: now } : {}),
-        },
-      });
-      if (!retry) {
-        delivered += 1;
-      }
-    }
-
-    return delivered;
   }
 
   async dispatchDueReminders(now = new Date()): Promise<number> {
@@ -459,6 +614,47 @@ export class NotificationsService {
     }
 
     return dispatched;
+  }
+
+  // Delivery status tracking & logs
+  async getDeliveryLogs(options: {
+    userId?: string;
+    notificationId?: string;
+    status?: PushDeliveryStatus;
+    limit?: number;
+  }) {
+    const { userId, notificationId, status, limit = 50 } = options;
+    return this.db.pushDeliveryLog.findMany({
+      where: {
+        ...(userId ? { userId } : {}),
+        ...(notificationId ? { notificationId } : {}),
+        ...(status ? { status } : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+      take: Math.min(limit, 100),
+      include: {
+        notification: {
+          select: {
+            title: true,
+            type: true,
+            priority: true,
+            createdAt: true,
+          },
+        },
+      },
+    });
+  }
+
+  async getQueueStats(): Promise<QueueStats> {
+    return this.queueService.getQueueStats();
+  }
+
+  async getDlqJobs(limit = 50) {
+    return this.queueService.getDlqJobs(limit);
+  }
+
+  async retryDlqJob(job: PushJob) {
+    return this.queueService.enqueue(job.notificationId);
   }
 
   private localDateTime(date: Date) {

@@ -362,9 +362,38 @@ model Notification {
   pushSentAt    DateTime?
   pushAttempts  Int              @default(0)
   user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deliveryLogs  PushDeliveryLog[]
 
   @@unique([userId, eventKey])
   @@index([pushSentAt, pushClaimedAt])
+}
+
+enum PushDeliveryStatus {
+  QUEUED
+  SENT
+  FAILED
+}
+
+model PushDeliveryLog {
+  id             String             @id @default(cuid())
+  notificationId String
+  subscriptionId String?
+  userId         String
+  endpoint       String
+  deviceType     String?
+  status         PushDeliveryStatus @default(QUEUED)
+  attempts       Int                @default(0)
+  httpStatus     Int?
+  errorDetails   String?
+  sentAt         DateTime?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  notification   Notification       @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+
+  @@index([notificationId])
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
 }
 
 enum Priority {
