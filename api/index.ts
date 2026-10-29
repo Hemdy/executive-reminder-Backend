@@ -4,7 +4,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { ExpressAdapter } from '@nestjs/platform-express';
 import express from 'express';
 import { AppModule } from '../src/app.module';
-import { getAllowedOrigins } from '../src/common/cors';
+import { isAllowedOrigin } from '../src/common/cors';
 
 let cached: express.Express | undefined;
 let bootstrapPromise: Promise<express.Express> | undefined;
@@ -15,7 +15,13 @@ async function createApp(): Promise<express.Express> {
 
   app.setGlobalPrefix('api');
   app.enableCors({
-    origin: getAllowedOrigins(),
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+      if (!origin || isAllowedOrigin(origin)) {
+        callback(null, true);
+      } else {
+        callback(null, false);
+      }
+    },
     methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
@@ -36,15 +42,15 @@ async function createApp(): Promise<express.Express> {
 
 function applyCorsHeaders(req: express.Request, res: express.Response): boolean {
   const origin = req.headers.origin;
-  const allowedOrigin = origin && getAllowedOrigins().includes(origin) ? origin : undefined;
-  if (allowedOrigin) {
-    res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+  const allowed = isAllowedOrigin(origin);
+  if (origin && allowed) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   }
   res.setHeader('Vary', 'Origin');
-  return Boolean(allowedOrigin);
+  return Boolean(allowed);
 }
 
 export default async function handler(req: express.Request, res: express.Response) {
@@ -65,6 +71,7 @@ export default async function handler(req: express.Request, res: express.Respons
     } catch (error) {
       bootstrapPromise = undefined;
       console.error('Unable to initialize the NestJS API function.', error);
+      applyCorsHeaders(req, res);
       if (!res.headersSent) {
         res.status(503).json({ message: 'The API is temporarily unavailable.' });
       }

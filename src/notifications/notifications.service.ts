@@ -38,7 +38,7 @@ export interface PushPreferences {
 export class NotificationsService {
   private readonly logger = new Logger(NotificationsService.name);
   private readonly vapidPublicKey: string;
-  private readonly vapidConfigured: boolean;
+  private vapidConfigured: boolean;
   private readonly reminderTimezone: string;
 
   constructor(
@@ -52,7 +52,15 @@ export class NotificationsService {
     this.reminderTimezone = config.get<string>('REMINDER_TIMEZONE') ?? 'Africa/Lagos';
 
     if (this.vapidConfigured) {
-      webPush.setVapidDetails(vapidSubject, this.vapidPublicKey, vapidPrivateKey);
+      try {
+        webPush.setVapidDetails(vapidSubject, this.vapidPublicKey, vapidPrivateKey);
+      } catch (error) {
+        this.vapidConfigured = false;
+        this.logger.error(
+          'Failed to configure VAPID details. Push notifications will be unavailable until valid keys are configured.',
+          error instanceof Error ? error.stack : undefined,
+        );
+      }
     }
   }
 
