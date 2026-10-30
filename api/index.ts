@@ -24,6 +24,7 @@ async function createApp(): Promise<express.Express> {
     },
     methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
+    exposedHeaders: ['Content-Disposition', 'Content-Length'],
     credentials: true,
     optionsSuccessStatus: 204,
   });
@@ -48,6 +49,7 @@ function applyCorsHeaders(req: express.Request, res: express.Response): boolean 
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length');
   }
   res.setHeader('Vary', 'Origin');
   return Boolean(allowed);

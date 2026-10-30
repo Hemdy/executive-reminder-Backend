@@ -17,9 +17,12 @@ import {
 import { IsArray, IsDateString, IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
 import { MeetingStatus, MeetingType } from '@prisma/client';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { extname } from 'node:path';
 import type { Response } from 'express';
-import { sendAttachment } from '../common/attachment-response';
+import {
+  attachmentMulterOptions,
+  sendAttachment,
+  UploadedAttachmentFile,
+} from '../common/attachment-response';
 import { Permissions } from '../common/decorators';
 import { JwtAuthGuard, PermissionsGuard } from '../common/guards';
 import { MeetingsService } from './meetings.service';
@@ -48,19 +51,6 @@ class MeetingCommentDto {
   @IsString() @MaxLength(5000) body!: string;
 }
 
-const allowedAttachmentTypes = new Map([
-  ['.pdf', 'application/pdf'],
-  ['.doc', 'application/msword'],
-  ['.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
-]);
-
-interface UploadedMeetingFile {
-  originalname: string;
-  mimetype: string;
-  size: number;
-  buffer: Buffer;
-}
-
 @Controller('meetings')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 export class MeetingsController {
@@ -73,19 +63,8 @@ export class MeetingsController {
   @Get(':id/attachments') @Header('Cache-Control', 'private, no-store') attachments(@Param('id') id: string, @Req() req: any) { return this.service.listAttachments(id, req.user.id); }
   @Post(':id/attachments')
   @Header('Cache-Control', 'private, no-store')
-  @UseInterceptors(FileInterceptor('file', {
-    limits: { fileSize: 4 * 1024 * 1024 },
-    fileFilter: (_request, file, callback) => {
-      const extension = extname(file.originalname).toLowerCase();
-      const expectedMimeType = allowedAttachmentTypes.get(extension);
-      if (!expectedMimeType || (file.mimetype !== expectedMimeType && file.mimetype !== 'application/octet-stream')) {
-        callback(new BadRequestException('Only PDF and Word documents are supported'), false);
-        return;
-      }
-      callback(null, true);
-    },
-  }))
-  addAttachment(@Param('id') id: string, @Req() req: any, @UploadedFile() file: UploadedMeetingFile | undefined) {
+  @UseInterceptors(FileInterceptor('file', attachmentMulterOptions))
+  addAttachment(@Param('id') id: string, @Req() req: any, @UploadedFile() file: UploadedAttachmentFile | undefined) {
     if (!file) {
       throw new BadRequestException('Choose a supported attachment to upload');
     }

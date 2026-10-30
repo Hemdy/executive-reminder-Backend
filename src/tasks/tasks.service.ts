@@ -1,26 +1,14 @@
 import {
-  BadGatewayException,
   BadRequestException,
   ForbiddenException,
   Injectable,
   NotFoundException
 } from '@nestjs/common';
 import { TaskStatus } from '@prisma/client';
-import { randomUUID } from 'node:crypto';
-import { extname } from 'node:path';
+import { UploadedAttachmentFile } from '../common/attachment-response';
 import { PrismaService } from '../prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { TaskAttachmentStorageService } from './task-attachment-storage.service';
-
-const MAX_ATTACHMENT_SIZE = 4 * 1024 * 1024;
-const ATTACHMENT_TYPES = new Map([
-  ['.pdf', { mimeType: 'application/pdf', signature: Buffer.from('%PDF-') }],
-  ['.doc', { mimeType: 'application/msword', signature: Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]) }],
-  ['.docx', {
-    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    signature: Buffer.from('PK')
-  }]
-]);
 
 @Injectable()
 export class TasksService {
@@ -372,45 +360,20 @@ export class TasksService {
   async addAttachment(
     taskId: string,
     userId: string,
-    file: { originalname: string; mimetype: string; size: number; buffer: Buffer }
+    file: UploadedAttachmentFile
   ) {
     await this.ensureTaskAccess(taskId, userId);
-    if (file.size > MAX_ATTACHMENT_SIZE) {
-      throw new BadRequestException('Attachments must be 4 MB or smaller');
-    }
-    const fileName = file.originalname
-      .replace(/\\/g, '/')
-      .split('/')
-      .pop()
-      ?.replace(/[\u0000-\u001f\u007f]/g, '_')
-      .slice(0, 255);
-    if (!fileName || fileName === '.' || fileName === '..') {
-      throw new BadRequestException('Attachment filename is invalid');
-    }
-
-    const extension = extname(fileName).toLowerCase();
-    const fileType = ATTACHMENT_TYPES.get(extension);
-    if (
-      !fileType ||
-      (file.mimetype !== fileType.mimeType && file.mimetype !== 'application/octet-stream')
-    ) {
-      throw new BadRequestException('Only valid PDF and Word documents are supported');
-    }
-    if (!this.hasValidFileSignature(extension, file.buffer)) {
-      throw new BadRequestException('The uploaded file content does not match its file type');
-    }
-
-    const storagePath = `${taskId}/${randomUUID()}${extension}`;
-    await this.attachmentStorage.upload(storagePath, file.buffer, fileType.mimeType);
+    const prepared = await this.attachmentStorage.prepareAndUpload('tasks', taskId, file);
     try {
       return await this.db.taskAttachment.create({
         data: {
           taskId,
           uploaderId: userId,
-          fileName,
-          mimeType: fileType.mimeType,
-          size: file.size,
-          storagePath
+          fileName: prepared.fileName,
+          mimeType: prepared.mimeType,
+          size: prepared.size,
+          storagePath: prepared.storagePath,
+          legacyContent: prepared.inlineContent,
         },
         select: {
           id: true,
@@ -425,7 +388,7 @@ export class TasksService {
       });
     } catch (error) {
       try {
-        await this.attachmentStorage.remove(storagePath);
+        await this.attachmentStorage.remove(prepared.storagePath);
       } catch (cleanupError) {
         throw new AggregateError(
           [error, cleanupError],
@@ -451,28 +414,7 @@ export class TasksService {
     if (!attachment) {
       throw new NotFoundException('Task attachment not found');
     }
-    if (attachment.storagePath) {
-      return {
-        ...attachment,
-        content: await this.attachmentStorage.download(attachment.storagePath)
-      };
-    }
-    if (attachment.legacyContent) {
-      return { ...attachment, content: Buffer.from(attachment.legacyContent) };
-    }
-    throw new BadGatewayException('Task attachment is missing its stored file');
-  }
-
-  private hasValidFileSignature(extension: string, content: Buffer): boolean {
-    const type = ATTACHMENT_TYPES.get(extension);
-    if (!type || !content.subarray(0, type.signature.length).equals(type.signature)) {
-      return false;
-    }
-    if (extension !== '.docx') {
-      return true;
-    }
-    const archiveNames = content.toString('latin1');
-    return archiveNames.includes('[Content_Types].xml') && archiveNames.includes('word/document.xml');
+    return this.attachmentStorage.resolveContent(attachment, 'Task');
   }
 
   private async ensureTaskAccess(taskId: string, userId: string): Promise<void> {
