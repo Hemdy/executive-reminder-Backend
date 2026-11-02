@@ -24,6 +24,12 @@ export interface PreparedAttachmentPayload {
   inlineContent: ReturnType<Uint8Array['slice']> | null;
 }
 
+export class MissingAttachmentObjectError extends BadGatewayException {
+  constructor() {
+    super('Attachment file is missing from storage');
+  }
+}
+
 type StorageConfiguration =
   | {
       provider: 'supabase';
@@ -164,6 +170,9 @@ export class TaskAttachmentStorageService {
       });
 
       if (!response.ok) {
+        if (response.status === 404) {
+          throw new MissingAttachmentObjectError();
+        }
         throw new BadGatewayException(
           `Attachment storage could not provide the file (${response.status})`,
         );
@@ -176,7 +185,7 @@ export class TaskAttachmentStorageService {
       return await readFile(this.localPath({ provider: 'local', directory: localDir }, path));
     } catch (error) {
       if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
-        throw new BadGatewayException('Attachment file is missing from storage');
+        throw new MissingAttachmentObjectError();
       }
       throw error;
     }
@@ -188,10 +197,19 @@ export class TaskAttachmentStorageService {
     }
     const config = this.configuration();
     if (config.provider === 'database') {
-      return;
+      throw new BadGatewayException(
+        'External attachment storage is not configured for this stored file',
+      );
     }
     if (config.provider === 'local') {
-      await unlink(this.localPath(config, path)).catch(() => undefined);
+      try {
+        await unlink(this.localPath(config, path));
+      } catch (error) {
+        if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+          return;
+        }
+        throw error;
+      }
       return;
     }
 
@@ -209,6 +227,9 @@ export class TaskAttachmentStorageService {
     );
 
     if (!response.ok) {
+      if (response.status === 404) {
+        return;
+      }
       throw new BadGatewayException(
         `Attachment storage could not remove the uploaded file (${response.status})`,
       );

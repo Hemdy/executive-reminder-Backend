@@ -8,7 +8,10 @@ import { TaskStatus } from '@prisma/client';
 import { UploadedAttachmentFile } from '../common/attachment-response';
 import { PrismaService } from '../prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { TaskAttachmentStorageService } from './task-attachment-storage.service';
+import {
+  MissingAttachmentObjectError,
+  TaskAttachmentStorageService
+} from './task-attachment-storage.service';
 
 @Injectable()
 export class TasksService {
@@ -283,6 +286,7 @@ export class TasksService {
         id: true,
         body: true,
         createdAt: true,
+        updatedAt: true,
         author: {
           select: { id: true, title: true, firstName: true, lastName: true }
         }
@@ -303,6 +307,7 @@ export class TasksService {
         id: true,
         body: true,
         createdAt: true,
+        updatedAt: true,
         author: {
           select: { id: true, title: true, firstName: true, lastName: true }
         }
@@ -337,6 +342,37 @@ export class TasksService {
       `task_comment:${comment.id}`,
     );
     return comment;
+  }
+
+  async updateComment(taskId: string, commentId: string, userId: string, body: string) {
+    await this.ensureTaskAccess(taskId, userId);
+    const comment = await this.db.taskComment.findFirst({
+      where: { id: commentId, taskId },
+      select: { authorId: true },
+    });
+    if (!comment) {
+      throw new NotFoundException('Task comment not found');
+    }
+    if (comment.authorId !== userId && !(await this.hasTaskWritePermission(userId))) {
+      throw new ForbiddenException('You are not allowed to edit this comment');
+    }
+    const trimmedBody = body.trim();
+    if (!trimmedBody) {
+      throw new BadRequestException('Comment cannot be empty');
+    }
+    return this.db.taskComment.update({
+      where: { id: commentId },
+      data: { body: trimmedBody },
+      select: {
+        id: true,
+        body: true,
+        createdAt: true,
+        updatedAt: true,
+        author: {
+          select: { id: true, title: true, firstName: true, lastName: true }
+        }
+      }
+    });
   }
 
   async listAttachments(taskId: string, userId: string) {
@@ -417,6 +453,58 @@ export class TasksService {
     return this.attachmentStorage.resolveContent(attachment, 'Task');
   }
 
+  async deleteAttachment(taskId: string, attachmentId: string, userId: string) {
+    await this.ensureTaskAccess(taskId, userId);
+    const attachment = await this.db.taskAttachment.findFirst({
+      where: { id: attachmentId, taskId },
+      select: {
+        id: true,
+        uploaderId: true,
+        fileName: true,
+        mimeType: true,
+        size: true,
+        storagePath: true,
+        legacyContent: true,
+      },
+    });
+    if (!attachment) {
+      throw new NotFoundException('Task attachment not found');
+    }
+    if (attachment.uploaderId !== userId && !(await this.hasTaskWritePermission(userId))) {
+      throw new ForbiddenException('You are not allowed to delete this attachment');
+    }
+
+    const storedContent = attachment.storagePath
+      ? await this.attachmentStorage.resolveContent(attachment, 'Task').catch(error => {
+          if (error instanceof MissingAttachmentObjectError) {
+            return null;
+          }
+          throw error;
+        })
+      : null;
+    await this.attachmentStorage.remove(attachment.storagePath);
+    try {
+      await this.db.taskAttachment.delete({ where: { id: attachment.id } });
+    } catch (error) {
+      if (attachment.storagePath && storedContent) {
+        try {
+          await this.attachmentStorage.upload(
+            attachment.storagePath,
+            storedContent.content,
+            attachment.mimeType,
+          );
+        } catch (restoreError) {
+          throw new AggregateError(
+            [error, restoreError],
+            'Unable to delete task attachment metadata or restore its stored file',
+          );
+        }
+      }
+      throw error;
+    }
+    return { id: attachment.id, deleted: true };
+  }
+
   private async ensureTaskAccess(taskId: string, userId: string): Promise<void> {
     const task = await this.db.task.findUnique({
       where: { id: taskId },
@@ -465,13 +553,15 @@ export class TasksService {
     });
     return Boolean(
       role?.isActive &&
+      (role.name.toUpperCase() === 'ADMIN' ||
       role.permissions.some(({ permission }) =>
         permission.resource === 'tasks' && actions.includes(permission.action)
-      )
+      ))
     );
   }
 
   private readonly taskRoleSelect = {
+    name: true,
     isActive: true,
     permissions: {
       select: {

@@ -60,6 +60,10 @@ export class MeetingsController {
   @Get(':id') get(@Param('id') id: string, @Req() req: any) { return this.service.get(id, req.user.id); }
   @Get(':id/comments') comments(@Param('id') id: string, @Req() req: any) { return this.service.listComments(id, req.user.id); }
   @Post(':id/comments') addComment(@Param('id') id: string, @Body() dto: MeetingCommentDto, @Req() req: any) { return this.service.addComment(id, req.user.id, dto.body); }
+  @Patch(':id/comments/:commentId')
+  updateComment(@Param('id') id: string, @Param('commentId') commentId: string, @Body() dto: MeetingCommentDto, @Req() req: any) {
+    return this.service.updateComment(id, commentId, req.user.id, dto.body);
+  }
   @Get(':id/attachments') @Header('Cache-Control', 'private, no-store') attachments(@Param('id') id: string, @Req() req: any) { return this.service.listAttachments(id, req.user.id); }
   @Post(':id/attachments')
   @Header('Cache-Control', 'private, no-store')
@@ -80,6 +84,12 @@ export class MeetingsController {
     const attachment = await this.service.getAttachment(meetingId, attachmentId, req.user.id);
     sendAttachment(response, attachment);
   }
+
+  @Delete(':id/attachments/:attachmentId')
+  deleteAttachment(@Param('id') id: string, @Param('attachmentId') attachmentId: string, @Req() req: any) {
+    return this.service.deleteAttachment(id, attachmentId, req.user.id);
+  }
+
   @Patch(':id') @Permissions('meetings:write') update(@Param('id') id: string, @Body() dto: UpdateMeetingDto, @Req() req: any) { return this.service.update(id, dto, req.user.id); }
   @Patch(':id/status') @Permissions('meetings:write') status(@Param('id') id: string, @Body() dto: MeetingStatusDto, @Req() req: any) { return this.service.status(id, dto.status, req.user.id); }
   @Delete(':id') @Permissions('meetings:write') remove(@Param('id') id: string, @Req() req: any) { return this.service.remove(id, req.user.id); }

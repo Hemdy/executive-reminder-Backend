@@ -4,10 +4,14 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { hasActivityWritePermission } from '../common/activity-access';
 import { UploadedAttachmentFile } from '../common/attachment-response';
 import { PrismaService } from '../prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { TaskAttachmentStorageService } from '../tasks/task-attachment-storage.service';
+import {
+  MissingAttachmentObjectError,
+  TaskAttachmentStorageService,
+} from '../tasks/task-attachment-storage.service';
 
 @Injectable()
 export class RemindersService {
@@ -274,6 +278,7 @@ export class RemindersService {
         id: true,
         body: true,
         createdAt: true,
+        updatedAt: true,
         author: { select: { id: true, title: true, firstName: true, lastName: true } },
       },
       orderBy: { createdAt: 'asc' },
@@ -292,6 +297,7 @@ export class RemindersService {
         id: true,
         body: true,
         createdAt: true,
+        updatedAt: true,
         author: { select: { id: true, title: true, firstName: true, lastName: true } },
       },
     });
@@ -320,6 +326,38 @@ export class RemindersService {
       `reminder_comment:${comment.id}`,
     );
     return comment;
+  }
+
+  async updateComment(reminderId: string, commentId: string, userId: string, body: string) {
+    await this.ensureReminderAccess(reminderId, userId);
+    const comment = await this.db.reminderComment.findFirst({
+      where: { id: commentId, reminderId },
+      select: { authorId: true },
+    });
+    if (!comment) {
+      throw new NotFoundException('Reminder comment not found');
+    }
+    if (
+      comment.authorId !== userId &&
+      !(await hasActivityWritePermission(this.db, userId, 'reminders'))
+    ) {
+      throw new ForbiddenException('You are not allowed to edit this comment');
+    }
+    const trimmedBody = body.trim();
+    if (!trimmedBody) {
+      throw new BadRequestException('Comment cannot be empty');
+    }
+    return this.db.reminderComment.update({
+      where: { id: commentId },
+      data: { body: trimmedBody },
+      select: {
+        id: true,
+        body: true,
+        createdAt: true,
+        updatedAt: true,
+        author: { select: { id: true, title: true, firstName: true, lastName: true } },
+      },
+    });
   }
 
   async listAttachments(reminderId: string, userId: string) {
@@ -387,6 +425,61 @@ export class RemindersService {
       throw new NotFoundException('Reminder attachment not found');
     }
     return this.attachmentStorage.resolveContent(attachment, 'Reminder');
+  }
+
+  async deleteAttachment(reminderId: string, attachmentId: string, userId: string) {
+    await this.ensureReminderAccess(reminderId, userId);
+    const attachment = await this.db.reminderAttachment.findFirst({
+      where: { id: attachmentId, reminderId },
+      select: {
+        id: true,
+        uploaderId: true,
+        fileName: true,
+        mimeType: true,
+        size: true,
+        storagePath: true,
+        legacyContent: true,
+      },
+    });
+    if (!attachment) {
+      throw new NotFoundException('Reminder attachment not found');
+    }
+    if (
+      attachment.uploaderId !== userId &&
+      !(await hasActivityWritePermission(this.db, userId, 'reminders'))
+    ) {
+      throw new ForbiddenException('You are not allowed to delete this attachment');
+    }
+
+    const storedContent = attachment.storagePath
+      ? await this.attachmentStorage.resolveContent(attachment, 'Reminder').catch(error => {
+          if (error instanceof MissingAttachmentObjectError) {
+            return null;
+          }
+          throw error;
+        })
+      : null;
+    await this.attachmentStorage.remove(attachment.storagePath);
+    try {
+      await this.db.reminderAttachment.delete({ where: { id: attachment.id } });
+    } catch (error) {
+      if (attachment.storagePath && storedContent) {
+        try {
+          await this.attachmentStorage.upload(
+            attachment.storagePath,
+            storedContent.content,
+            attachment.mimeType,
+          );
+        } catch (restoreError) {
+          throw new AggregateError(
+            [error, restoreError],
+            'Unable to delete reminder attachment metadata or restore its stored file',
+          );
+        }
+      }
+      throw error;
+    }
+    return { id: attachment.id, deleted: true };
   }
 
   private async ensureReminderAccess(reminderId: string, userId: string): Promise<void> {

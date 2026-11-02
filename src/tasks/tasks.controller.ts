@@ -68,6 +68,16 @@ export class TasksController {
     return this.service.addComment(id, req.user.id, dto.body);
   }
 
+  @Patch(':id/comments/:commentId')
+  updateComment(
+    @Param('id') id: string,
+    @Param('commentId') commentId: string,
+    @Body() dto: TaskCommentDto,
+    @Req() req: any
+  ) {
+    return this.service.updateComment(id, commentId, req.user.id, dto.body);
+  }
+
   @Get(':id/attachments')
   @Header('Cache-Control', 'private, no-store')
   attachments(@Param('id') id: string, @Req() req: any) {
@@ -97,6 +107,15 @@ export class TasksController {
   ) {
     const attachment = await this.service.getAttachment(taskId, attachmentId, req.user.id);
     sendAttachment(response, attachment);
+  }
+
+  @Delete(':id/attachments/:attachmentId')
+  deleteAttachment(
+    @Param('id') id: string,
+    @Param('attachmentId') attachmentId: string,
+    @Req() req: any
+  ) {
+    return this.service.deleteAttachment(id, attachmentId, req.user.id);
   }
 
   @Delete(':id')

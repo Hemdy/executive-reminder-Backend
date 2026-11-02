@@ -64,6 +64,10 @@ export class RequestsController {
 
   @Get(':id/comments') comments(@Param('id') id: string, @Req() req: any) { return this.s.listComments(id, req.user.id); }
   @Post(':id/comments') addComment(@Param('id') id: string, @Body() dto: RequestCommentDto, @Req() req: any) { return this.s.addComment(id, req.user.id, dto.body); }
+  @Patch(':id/comments/:commentId')
+  updateComment(@Param('id') id: string, @Param('commentId') commentId: string, @Body() dto: RequestCommentDto, @Req() req: any) {
+    return this.s.updateComment(id, commentId, req.user.id, dto.body);
+  }
   @Get(':id/attachments') @Header('Cache-Control', 'private, no-store') attachments(@Param('id') id: string, @Req() req: any) { return this.s.listAttachments(id, req.user.id); }
   @Post(':id/attachments')
   @Header('Cache-Control', 'private, no-store')
@@ -84,6 +88,11 @@ export class RequestsController {
   ) {
     const attachment = await this.s.getAttachment(requestId, attachmentId, req.user.id);
     sendAttachment(response, attachment);
+  }
+
+  @Delete(':id/attachments/:attachmentId')
+  deleteAttachment(@Param('id') id: string, @Param('attachmentId') attachmentId: string, @Req() req: any) {
+    return this.s.deleteAttachment(id, attachmentId, req.user.id);
   }
 
   @Delete(':id') @Permissions('requests:write') remove(@Param('id') id: string, @Req() req: any) { return this.s.remove(id, req.user.id); }

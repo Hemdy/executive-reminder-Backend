@@ -4,10 +4,14 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { hasActivityWritePermission } from '../common/activity-access';
 import { UploadedAttachmentFile } from '../common/attachment-response';
 import { PrismaService } from '../prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { TaskAttachmentStorageService } from '../tasks/task-attachment-storage.service';
+import {
+  MissingAttachmentObjectError,
+  TaskAttachmentStorageService,
+} from '../tasks/task-attachment-storage.service';
 
 @Injectable()
 export class RequestsService {
@@ -218,6 +222,7 @@ export class RequestsService {
         id: true,
         body: true,
         createdAt: true,
+        updatedAt: true,
         author: { select: { id: true, title: true, firstName: true, lastName: true } },
       },
       orderBy: { createdAt: 'asc' },
@@ -236,6 +241,7 @@ export class RequestsService {
         id: true,
         body: true,
         createdAt: true,
+        updatedAt: true,
         author: { select: { id: true, title: true, firstName: true, lastName: true } },
       },
     });
@@ -263,6 +269,38 @@ export class RequestsService {
       `request_comment:${comment.id}`,
     );
     return comment;
+  }
+
+  async updateComment(requestId: string, commentId: string, userId: string, body: string) {
+    await this.ensureRequestAccess(requestId, userId);
+    const comment = await this.db.requestComment.findFirst({
+      where: { id: commentId, requestId },
+      select: { authorId: true },
+    });
+    if (!comment) {
+      throw new NotFoundException('Request comment not found');
+    }
+    if (
+      comment.authorId !== userId &&
+      !(await hasActivityWritePermission(this.db, userId, 'requests'))
+    ) {
+      throw new ForbiddenException('You are not allowed to edit this comment');
+    }
+    const trimmedBody = body.trim();
+    if (!trimmedBody) {
+      throw new BadRequestException('Comment cannot be empty');
+    }
+    return this.db.requestComment.update({
+      where: { id: commentId },
+      data: { body: trimmedBody },
+      select: {
+        id: true,
+        body: true,
+        createdAt: true,
+        updatedAt: true,
+        author: { select: { id: true, title: true, firstName: true, lastName: true } },
+      },
+    });
   }
 
   async listAttachments(requestId: string, userId: string) {
@@ -330,6 +368,61 @@ export class RequestsService {
       throw new NotFoundException('Request attachment not found');
     }
     return this.attachmentStorage.resolveContent(attachment, 'Request');
+  }
+
+  async deleteAttachment(requestId: string, attachmentId: string, userId: string) {
+    await this.ensureRequestAccess(requestId, userId);
+    const attachment = await this.db.requestAttachment.findFirst({
+      where: { id: attachmentId, requestId },
+      select: {
+        id: true,
+        uploaderId: true,
+        fileName: true,
+        mimeType: true,
+        size: true,
+        storagePath: true,
+        legacyContent: true,
+      },
+    });
+    if (!attachment) {
+      throw new NotFoundException('Request attachment not found');
+    }
+    if (
+      attachment.uploaderId !== userId &&
+      !(await hasActivityWritePermission(this.db, userId, 'requests'))
+    ) {
+      throw new ForbiddenException('You are not allowed to delete this attachment');
+    }
+
+    const storedContent = attachment.storagePath
+      ? await this.attachmentStorage.resolveContent(attachment, 'Request').catch(error => {
+          if (error instanceof MissingAttachmentObjectError) {
+            return null;
+          }
+          throw error;
+        })
+      : null;
+    await this.attachmentStorage.remove(attachment.storagePath);
+    try {
+      await this.db.requestAttachment.delete({ where: { id: attachment.id } });
+    } catch (error) {
+      if (attachment.storagePath && storedContent) {
+        try {
+          await this.attachmentStorage.upload(
+            attachment.storagePath,
+            storedContent.content,
+            attachment.mimeType,
+          );
+        } catch (restoreError) {
+          throw new AggregateError(
+            [error, restoreError],
+            'Unable to delete request attachment metadata or restore its stored file',
+          );
+        }
+      }
+      throw error;
+    }
+    return { id: attachment.id, deleted: true };
   }
 
   private async ensureRequestAccess(requestId: string, userId: string): Promise<void> {

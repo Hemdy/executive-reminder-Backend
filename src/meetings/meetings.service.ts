@@ -4,10 +4,14 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { hasActivityWritePermission } from '../common/activity-access';
 import { UploadedAttachmentFile } from '../common/attachment-response';
 import { PrismaService } from '../prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { TaskAttachmentStorageService } from '../tasks/task-attachment-storage.service';
+import {
+  MissingAttachmentObjectError,
+  TaskAttachmentStorageService,
+} from '../tasks/task-attachment-storage.service';
 
 @Injectable()
 export class MeetingsService {
@@ -210,6 +214,37 @@ export class MeetingsService {
     return comment;
   }
 
+  async updateComment(meetingId: string, commentId: string, userId: string, body: string) {
+    await this.ensureMeetingAccess(meetingId, userId);
+    const comment = await this.db.meetingComment.findFirst({
+      where: { id: commentId, meetingId },
+      select: { authorId: true },
+    });
+    if (!comment) {
+      throw new NotFoundException('Meeting comment not found');
+    }
+    if (
+      comment.authorId !== userId &&
+      !(await hasActivityWritePermission(this.db, userId, 'meetings'))
+    ) {
+      throw new ForbiddenException('You are not allowed to edit this comment');
+    }
+    const trimmedBody = body.trim();
+    if (!trimmedBody) {
+      throw new BadRequestException('Comment cannot be empty');
+    }
+    return this.db.meetingComment.update({
+      where: { id: commentId },
+      data: { body: trimmedBody },
+      select: {
+        id: true,
+        body: true,
+        createdAt: true,
+        author: { select: { id: true, title: true, firstName: true, lastName: true } },
+      },
+    });
+  }
+
   async listAttachments(meetingId: string, userId: string) {
     await this.ensureMeetingAccess(meetingId, userId);
     return this.db.meetingAttachment.findMany({
@@ -275,6 +310,61 @@ export class MeetingsService {
       throw new NotFoundException('Meeting attachment not found');
     }
     return this.attachmentStorage.resolveContent(attachment, 'Meeting');
+  }
+
+  async deleteAttachment(meetingId: string, attachmentId: string, userId: string) {
+    await this.ensureMeetingAccess(meetingId, userId);
+    const attachment = await this.db.meetingAttachment.findFirst({
+      where: { id: attachmentId, meetingId },
+      select: {
+        id: true,
+        uploaderId: true,
+        fileName: true,
+        mimeType: true,
+        size: true,
+        storagePath: true,
+        legacyContent: true,
+      },
+    });
+    if (!attachment) {
+      throw new NotFoundException('Meeting attachment not found');
+    }
+    if (
+      attachment.uploaderId !== userId &&
+      !(await hasActivityWritePermission(this.db, userId, 'meetings'))
+    ) {
+      throw new ForbiddenException('You are not allowed to delete this attachment');
+    }
+
+    const storedContent = attachment.storagePath
+      ? await this.attachmentStorage.resolveContent(attachment, 'Meeting').catch(error => {
+          if (error instanceof MissingAttachmentObjectError) {
+            return null;
+          }
+          throw error;
+        })
+      : null;
+    await this.attachmentStorage.remove(attachment.storagePath);
+    try {
+      await this.db.meetingAttachment.delete({ where: { id: attachment.id } });
+    } catch (error) {
+      if (attachment.storagePath && storedContent) {
+        try {
+          await this.attachmentStorage.upload(
+            attachment.storagePath,
+            storedContent.content,
+            attachment.mimeType,
+          );
+        } catch (restoreError) {
+          throw new AggregateError(
+            [error, restoreError],
+            'Unable to delete meeting attachment metadata or restore its stored file',
+          );
+        }
+      }
+      throw error;
+    }
+    return { id: attachment.id, deleted: true };
   }
 
   async remove(id: string, actorId: string) {
