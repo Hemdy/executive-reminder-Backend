@@ -11,6 +11,7 @@ import { PrismaService } from '../prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Permissions } from '../common/decorators';
 import { JwtAuthGuard, PermissionsGuard } from '../common/guards';
+import { RolePermissionsService } from '../common/role-permissions.service';
 
 class PermissionDto {
   @IsString() @IsNotEmpty() action!: string;
@@ -73,6 +74,7 @@ export class AdminController {
   constructor(
     private readonly db: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly rolePermissions: RolePermissionsService,
   ) {}
 
   @Get('users')
@@ -133,7 +135,7 @@ export class AdminController {
       update: { description: dto.description },
       create: { name: dto.name, description: dto.description },
     });
-    await this.setPermissions(role.id, dto.permissions);
+    await this.rolePermissions.setPermissions(role.id, dto.permissions);
     return this.getRole(role.id);
   }
 
@@ -213,7 +215,7 @@ export class AdminController {
   async updateRole(@Param('id') id: string, @Body() dto: UpdateRoleDto) {
     await this.requireRole(id);
     await this.db.role.update({ where: { id }, data: { name: dto.name, description: dto.description } });
-    if (dto.permissions !== undefined) await this.setPermissions(id, dto.permissions);
+    await this.rolePermissions.setPermissions(id, dto.permissions);
     return this.getRole(id);
   }
 
@@ -271,17 +273,4 @@ export class AdminController {
     });
   }
 
-  private async setPermissions(roleId: string, inputs?: PermissionDto[]) {
-    if (inputs === undefined) return;
-    await this.db.rolePermission.deleteMany({ where: { roleId } });
-    for (const input of inputs) {
-      const key = `${input.resource}:${input.action}`;
-      const permission = await this.db.permission.upsert({
-        where: { action_resource: { action: input.action, resource: input.resource } },
-        update: { key },
-        create: { key, action: input.action, resource: input.resource },
-      });
-      await this.db.rolePermission.create({ data: { roleId, permissionId: permission.id } });
-    }
-  }
 }
