@@ -41,10 +41,17 @@ records include `isActive`; password hashes are never returned by admin endpoint
 DTOs reject unknown fields.
 Roles accept arbitrary `name`, optional `description`, and permissions as
 `{ "action": "read", "resource": "tasks" }`; permission authorization consistently
-uses the `resource:action` identifier (for example `tasks:read`). All non-`ADMIN`
-roles are automatically granted `tasks:write`, `meetings:write`, `requests:write`,
-and `reminders:write`; this applies to existing roles at startup and to roles
-created or edited through the admin API. Other permissions remain role-configurable.
+uses the `resource:action` identifier (for example `tasks:read`). Non-`ADMIN`
+roles receive operational write permissions and a limited `users:assign` permission
+for selecting active task, reminder, request, and meeting participants. The
+Compliance, Compliance Officer, Corporate Services, and Managing Partner roles
+also receive read access to those operational resources. The assignment directory
+returns only active users' names, roles, departments, and avatars; full user records
+remain protected by `users:view`. A `DIRECTOR` role receives the role/user
+administration permissions needed to manage access, while only Admin and Director
+may change role definitions through the API. These defaults apply to existing roles
+at startup and to roles created or edited through the admin API; all other
+permissions remain role-configurable.
 PostgreSQL schema migrations are checked in under `prisma/migrations`, including
 the task comments and attachment tables.
 The Vercel-compatible function entry point is `api/index.ts`.

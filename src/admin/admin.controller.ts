@@ -10,7 +10,7 @@ import { NotificationType, Priority, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Permissions } from '../common/decorators';
-import { JwtAuthGuard, PermissionsGuard } from '../common/guards';
+import { JwtAuthGuard, PermissionsGuard, RoleAdministrationGuard } from '../common/guards';
 import { RolePermissionsService } from '../common/role-permissions.service';
 
 class PermissionDto {
@@ -83,6 +83,24 @@ export class AdminController {
     return this.db.user.findMany({ select: userSelect, orderBy: { createdAt: 'desc' } });
   }
 
+  @Get('users/directory')
+  @Permissions('users:assign')
+  userDirectory() {
+    return this.db.user.findMany({
+      where: { isActive: true },
+      select: {
+        id: true,
+        title: true,
+        firstName: true,
+        lastName: true,
+        role: true,
+        department: true,
+        avatarUrl: true,
+      },
+      orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+    });
+  }
+
   @Get('roles')
   @Permissions('roles:view')
   roles() {
@@ -128,6 +146,7 @@ export class AdminController {
   }
 
   @Post('roles')
+  @UseGuards(RoleAdministrationGuard)
   @Permissions('roles:create')
   async role(@Body() dto: RoleDto) {
     const role = await this.db.role.upsert({
@@ -211,6 +230,7 @@ export class AdminController {
 
   @Put('roles/:id')
   @Patch('roles/:id')
+  @UseGuards(RoleAdministrationGuard)
   @Permissions('roles:edit')
   async updateRole(@Param('id') id: string, @Body() dto: UpdateRoleDto) {
     await this.requireRole(id);
@@ -221,6 +241,7 @@ export class AdminController {
 
   @Patch('roles/:id/active')
   @Patch('roles/:id/status')
+  @UseGuards(RoleAdministrationGuard)
   @Permissions('roles:edit')
   async setRoleActive(@Param('id') id: string, @Body() dto: ActiveDto) {
     await this.requireRole(id);
@@ -229,6 +250,7 @@ export class AdminController {
   }
 
   @Delete('roles/:id')
+  @UseGuards(RoleAdministrationGuard)
   @Permissions('roles:delete')
   async deleteRole(@Param('id') id: string) {
     await this.requireRole(id);

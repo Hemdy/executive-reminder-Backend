@@ -6,7 +6,39 @@ const defaultNonAdminPermissions = [
   { action: 'write', resource: 'meetings' },
   { action: 'write', resource: 'requests' },
   { action: 'write', resource: 'reminders' },
+  { action: 'assign', resource: 'users' },
 ] as const;
+
+const operationalReadPermissions = [
+  { action: 'read', resource: 'tasks' },
+  { action: 'read', resource: 'meetings' },
+  { action: 'read', resource: 'requests' },
+  { action: 'read', resource: 'reminders' },
+] as const;
+
+const directorPermissions = [
+  { action: 'view', resource: 'roles' },
+  { action: 'create', resource: 'roles' },
+  { action: 'edit', resource: 'roles' },
+  { action: 'delete', resource: 'roles' },
+  { action: 'view', resource: 'users' },
+  { action: 'create', resource: 'users' },
+  { action: 'edit', resource: 'users' },
+  { action: 'delete', resource: 'users' },
+  { action: 'view', resource: 'settings' },
+  { action: 'edit', resource: 'settings' },
+] as const;
+
+const operationalRoleNames = new Set([
+  'COMPLIANCE',
+  'COMPLIANCEOFFICER',
+  'CORPORATESERVICES',
+  'MANAGINGPARTNER',
+]);
+
+function normalizeRoleName(name: string): string {
+  return name.toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
 
 export interface RolePermissionInput {
   action: string;
@@ -40,6 +72,10 @@ export class RolePermissionsService implements OnModuleInit {
     const permissions = [
       ...(inputs ?? []),
       ...(role.name === 'ADMIN' ? [] : defaultNonAdminPermissions),
+      ...(operationalRoleNames.has(normalizeRoleName(role.name))
+        ? operationalReadPermissions
+        : []),
+      ...(normalizeRoleName(role.name) === 'DIRECTOR' ? directorPermissions : []),
     ];
 
     for (const { action, resource } of permissions) {

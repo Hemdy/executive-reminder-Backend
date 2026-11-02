@@ -5,6 +5,22 @@ import { PrismaService } from '../prisma.service';
 import { PERMISSIONS_KEY } from './decorators';
 @Injectable()
 export class JwtAuthGuard extends AuthGuard('jwt') {}
+
+@Injectable()
+export class RoleAdministrationGuard implements CanActivate {
+  canActivate(context: ExecutionContext): boolean {
+    const request = context.switchToHttp().getRequest<{
+      user?: { role?: string; roleRef?: { name?: string } | null };
+    }>();
+    const roleName = request.user?.roleRef?.name ?? request.user?.role;
+    const role = roleName?.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (role !== 'ADMIN' && role !== 'DIRECTOR') {
+      throw new ForbiddenException('Only Admin or Director may manage roles');
+    }
+    return true;
+  }
+}
+
 @Injectable()
 export class PermissionsGuard implements CanActivate {
   constructor(private readonly reflector: Reflector, private readonly prisma: PrismaService) {}
