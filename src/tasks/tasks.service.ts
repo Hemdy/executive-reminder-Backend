@@ -174,13 +174,14 @@ export class TasksService {
               : participantsChanged
                 ? 'Task participants updated'
                 : 'Task updated';
+    const creatorName = `${task.createdBy.firstName} ${task.createdBy.lastName}`.trim();
     const message = statusChanged
       ? task.status === 'CLOSED'
-          ? `"${task.title}" was confirmed and officially closed by its creator.`
+          ? `"${task.title}" was confirmed and officially closed by ${creatorName}.`
           : task.status === 'COMPLETED'
-            ? `"${task.title}" was marked complete and is awaiting creator review.`
+            ? `"${task.title}" was marked complete and is awaiting review by ${creatorName}.`
             : task.status === 'CANCELLED'
-              ? `"${task.title}" was cancelled by its creator.`
+              ? `"${task.title}" was cancelled by ${creatorName}.`
               : `"${task.title}" is now ${task.status.replaceAll('_', ' ').toLowerCase()}.`
       : assignmentChanged
         ? `"${task.title}" has been assigned to ${task.assignedTo.firstName} ${task.assignedTo.lastName}.`
@@ -221,6 +222,7 @@ export class TasksService {
         createdAt: true,
         assignedToId: true,
         createdById: true,
+        createdBy: { select: { firstName: true, lastName: true } },
         participants: { select: { userId: true } }
       }
     });
@@ -231,7 +233,7 @@ export class TasksService {
     await this.notifications.createForUsers(
       {
         title: 'Task deleted',
-        message: `"${task.title}" was deleted.`,
+        message: `"${task.title}" was deleted by ${task.createdBy.firstName} ${task.createdBy.lastName}.`.trim(),
         type: 'TASK_UPDATED',
         priority: task.priority,
         sourceId: task.id,
@@ -270,6 +272,7 @@ export class TasksService {
       include: this.taskInclude
     });
     if (task.status !== status) {
+      const creatorName = `${updated.createdBy.firstName} ${updated.createdBy.lastName}`.trim();
       const recipients = [
         updated.assignedToId,
         updated.createdById,
@@ -286,11 +289,11 @@ export class TasksService {
             ? 'Task completion submitted for review'
             : 'Task status updated',
           message: status === TaskStatus.CLOSED
-            ? `"${updated.title}" was confirmed and officially closed by its creator.`
+            ? `"${updated.title}" was confirmed and officially closed by ${creatorName}.`
             : status === TaskStatus.COMPLETED
-            ? `"${updated.title}" was marked complete and is awaiting creator review.`
+            ? `"${updated.title}" was marked complete and is awaiting review by ${creatorName}.`
             : status === TaskStatus.CANCELLED
-              ? `"${updated.title}" was cancelled by its creator.`
+              ? `"${updated.title}" was cancelled by ${creatorName}.`
               : `"${updated.title}" is now ${updated.status.replaceAll('_', ' ').toLowerCase()}.`,
           type: 'TASK_STATUS',
           priority: updated.priority,

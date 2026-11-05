@@ -117,6 +117,7 @@ export class RequestsService {
       request.assignedToId !== existing.assignedToId ||
       (request.dueDate?.getTime() ?? null) !== (existing.dueDate?.getTime() ?? null);
     if (changed) {
+      const creatorName = `${request.requester.firstName} ${request.requester.lastName}`.trim();
       await this.notifications.suppressPendingPushNotifications('request', request.id);
       await this.notifications.createForUsers(
         {
@@ -134,12 +135,12 @@ export class RequestsService {
                   ? 'Request status updated'
                   : 'Request updated',
           message: request.status === 'COMPLETED'
-            ? `"${request.title}" was officially closed by its creator.`
+            ? `"${request.title}" was officially closed by ${creatorName}.`
             : request.status === 'CANCELLED'
-              ? `"${request.title}" was cancelled by its creator.`
+              ? `"${request.title}" was cancelled by ${creatorName}.`
               : request.status !== existing.status
                 ? `"${request.title}" is now ${request.status.replaceAll('_', ' ').toLowerCase()}.`
-                : `"${request.title}" was updated by its creator.`,
+                : `"${request.title}" was updated by ${creatorName}.`,
           type: 'REQUEST',
           priority: request.priority,
           sourceId: request.id,
@@ -164,6 +165,7 @@ export class RequestsService {
         priority: true,
         createdAt: true,
         requesterId: true,
+        requester: { select: { firstName: true, lastName: true } },
         assignedToId: true,
       },
     });
@@ -174,7 +176,7 @@ export class RequestsService {
     await this.notifications.createForUsers(
       {
         title: 'Request deleted',
-        message: `"${request.title}" was deleted.`,
+        message: `"${request.title}" was deleted by ${request.requester.firstName} ${request.requester.lastName}.`.trim(),
         type: 'REQUEST',
         priority: request.priority,
         sourceId: request.id,
@@ -215,6 +217,7 @@ export class RequestsService {
       include: this.requestInclude,
     });
     if (existing.status !== request.status) {
+      const creatorName = `${request.requester.firstName} ${request.requester.lastName}`.trim();
       await this.notifications.suppressPendingPushNotifications('request', request.id);
       await this.notifications.createForUsers(
         {
@@ -230,10 +233,12 @@ export class RequestsService {
                 ? 'Additional information requested'
                 : 'Request status updated',
           message: request.status === 'COMPLETED'
-            ? `"${request.title}" was officially closed by its creator.`
+            ? `"${request.title}" was officially closed by ${creatorName}.`
             : request.status === 'CANCELLED'
-              ? `"${request.title}" was cancelled by its creator.`
-              : `"${request.title}" is now ${request.status.replaceAll('_', ' ').toLowerCase()}.`,
+              ? `"${request.title}" was cancelled by ${creatorName}.`
+              : existing.requesterId === actorId
+                ? `"${request.title}" was updated by ${creatorName} and is now ${request.status.replaceAll('_', ' ').toLowerCase()}.`
+                : `"${request.title}" is now ${request.status.replaceAll('_', ' ').toLowerCase()}.`,
           type: 'REQUEST',
           priority: request.priority,
           sourceId: request.id,

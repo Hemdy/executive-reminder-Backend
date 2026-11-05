@@ -167,6 +167,7 @@ export class RemindersService {
     ].filter((recipientId, index, all) =>
       recipientId !== userId && all.indexOf(recipientId) === index
     );
+    const creatorName = `${reminder.createdBy.firstName} ${reminder.createdBy.lastName}`.trim();
     if (scheduleChanged || contentChanged || recipientChanged || statusChanged || participantsChanged) {
       await this.notifications.suppressPendingPushNotifications('reminder', reminder.id);
       if (recipients.length) {
@@ -188,12 +189,12 @@ export class RemindersService {
                     ? 'Reminder participants updated'
                     : 'Reminder updated',
             message: reminder.status === 'CANCELLED'
-              ? `"${reminder.title}" was cancelled by its creator.`
+              ? `"${reminder.title}" was cancelled by ${creatorName}.`
               : scheduleChanged
-                ? `"${reminder.title}" was rescheduled by its creator for ${reminder.reminderDate.toISOString().slice(0, 10)} at ${reminder.reminderTime}.`
+                ? `"${reminder.title}" was rescheduled by ${creatorName} for ${reminder.reminderDate.toISOString().slice(0, 10)} at ${reminder.reminderTime}.`
                 : statusChanged
-                  ? `"${reminder.title}" was updated by its creator and is now ${reminder.status.replaceAll('_', ' ').toLowerCase()}.`
-                  : `"${reminder.title}" was updated by its creator.`,
+                  ? `"${reminder.title}" was updated by ${creatorName} and is now ${reminder.status.replaceAll('_', ' ').toLowerCase()}.`
+                  : `"${reminder.title}" was updated by ${creatorName}.`,
             type: 'REMINDER',
             priority: reminder.priority,
             sourceId: reminder.id,
@@ -219,6 +220,7 @@ export class RemindersService {
         createdAt: true,
         recipientId: true,
         createdById: true,
+        createdBy: { select: { firstName: true, lastName: true } },
         participants: { select: { userId: true } },
       },
     });
@@ -229,7 +231,7 @@ export class RemindersService {
     await this.notifications.createForUsers(
       {
         title: 'Reminder deleted',
-        message: `"${reminder.title}" was deleted.`,
+        message: `"${reminder.title}" was deleted by ${reminder.createdBy.firstName} ${reminder.createdBy.lastName}.`.trim(),
         type: 'REMINDER',
         priority: reminder.priority,
         sourceId: reminder.id,
@@ -264,6 +266,7 @@ export class RemindersService {
       include: this.reminderInclude,
     });
     if (existing.status !== reminder.status) {
+      const creatorName = `${reminder.createdBy.firstName} ${reminder.createdBy.lastName}`.trim();
       const recipients = [
         reminder.recipientId,
         reminder.createdById,
@@ -278,9 +281,11 @@ export class RemindersService {
               ? 'Reminder completed'
               : 'Reminder status updated',
           message: reminder.status === 'CANCELLED'
-            ? `"${reminder.title}" was cancelled by its creator.`
+            ? `"${reminder.title}" was cancelled by ${creatorName}.`
             : reminder.status === 'COMPLETED'
-              ? `"${reminder.title}" was marked complete.`
+              ? existing.createdById === userId
+                ? `"${reminder.title}" was marked complete by ${creatorName}.`
+                : `"${reminder.title}" was marked complete. It was created by ${creatorName}.`
               : `"${reminder.title}" is now ${reminder.status.replaceAll('_', ' ').toLowerCase()}.`,
           type: 'REMINDER',
           priority: reminder.priority,

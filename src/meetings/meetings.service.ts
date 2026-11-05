@@ -136,6 +136,7 @@ export class MeetingsService {
       meeting.location !== existing.location ||
       meeting.meetingType !== existing.meetingType ||
       meeting.status !== existing.status;
+    const creatorName = `${meeting.organizer.firstName} ${meeting.organizer.lastName}`.trim();
     const scheduleChanged =
       meeting.meetingDate.getTime() !== existing.meetingDate.getTime() ||
       meeting.startTime !== existing.startTime ||
@@ -150,10 +151,10 @@ export class MeetingsService {
               ? 'Meeting rescheduled'
               : 'Meeting updated',
           message: meeting.status === 'CANCELLED'
-            ? `"${meeting.title}" was cancelled by its creator.`
+            ? `"${meeting.title}" was cancelled by ${creatorName}.`
             : scheduleChanged || meeting.status === 'RESCHEDULED'
-              ? `"${meeting.title}" was rescheduled by its creator for ${meeting.meetingDate.toISOString().slice(0, 10)} at ${meeting.startTime}.`
-            : `"${meeting.title}" has been updated. It is scheduled for ${meeting.meetingDate.toISOString().slice(0, 10)} at ${meeting.startTime}.`,
+              ? `"${meeting.title}" was rescheduled by ${creatorName} for ${meeting.meetingDate.toISOString().slice(0, 10)} at ${meeting.startTime}.`
+            : `"${meeting.title}" was updated by ${creatorName}. It is scheduled for ${meeting.meetingDate.toISOString().slice(0, 10)} at ${meeting.startTime}.`,
           type: 'MEETING',
           priority: 'MEDIUM',
           sourceId: meeting.id,
@@ -383,6 +384,7 @@ export class MeetingsService {
         id: true,
         title: true,
         organizerId: true,
+        organizer: { select: { firstName: true, lastName: true } },
         createdAt: true,
         participants: { select: { userId: true } },
       },
@@ -394,7 +396,7 @@ export class MeetingsService {
     await this.notifications.createForUsers(
       {
         title: 'Meeting deleted',
-        message: `"${meeting.title}" was deleted.`,
+        message: `"${meeting.title}" was deleted by ${meeting.organizer.firstName} ${meeting.organizer.lastName}.`.trim(),
         type: 'MEETING',
         priority: 'MEDIUM',
         sourceId: meeting.id,
@@ -423,6 +425,7 @@ export class MeetingsService {
       include: this.meetingInclude,
     });
     if (existing.status !== meeting.status) {
+      const creatorName = `${meeting.organizer.firstName} ${meeting.organizer.lastName}`.trim();
       await this.notifications.suppressPendingPushNotifications('meeting', meeting.id);
       await this.notifications.createForUsers(
         {
@@ -432,10 +435,10 @@ export class MeetingsService {
               ? 'Meeting rescheduled'
               : 'Meeting status updated',
           message: meeting.status === 'CANCELLED'
-            ? `"${meeting.title}" was cancelled by its creator.`
+            ? `"${meeting.title}" was cancelled by ${creatorName}.`
             : meeting.status === 'RESCHEDULED'
-              ? `"${meeting.title}" was marked rescheduled by its creator.`
-              : `"${meeting.title}" is now ${meeting.status.replaceAll('_', ' ').toLowerCase()}.`,
+              ? `"${meeting.title}" was marked rescheduled by ${creatorName}.`
+              : `"${meeting.title}" is now ${meeting.status.replaceAll('_', ' ').toLowerCase()} (organized by ${creatorName}).`,
           type: 'MEETING',
           priority: 'MEDIUM',
           sourceId: meeting.id,
