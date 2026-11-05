@@ -4,8 +4,8 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { hasActivityWritePermission } from '../common/activity-access';
 import { UploadedAttachmentFile } from '../common/attachment-response';
+import { hasActivityWritePermission } from '../common/activity-access';
 import { PrismaService } from '../prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import {
@@ -100,6 +100,9 @@ export class RequestsService {
         assignedToId: true,
       },
     });
+    if (existing.requesterId !== actorId) {
+      throw new ForbiddenException('Only the request creator can edit this request');
+    }
     const request = await this.db.request.update({
       where: { id },
       data: { ...d, dueDate: d.dueDate ? new Date(d.dueDate) : undefined },
@@ -117,7 +120,9 @@ export class RequestsService {
       await this.notifications.suppressPendingPushNotifications('request', request.id);
       await this.notifications.createForUsers(
         {
-          title: request.status === 'APPROVED'
+          title: request.status === 'COMPLETED'
+            ? 'Request closed'
+            : request.status === 'APPROVED'
             ? 'Request approved'
             : request.status === 'REJECTED'
               ? 'Request rejected'
@@ -128,9 +133,13 @@ export class RequestsService {
                 : request.status !== existing.status
                   ? 'Request status updated'
                   : 'Request updated',
-          message: request.status !== existing.status
-            ? `"${request.title}" is now ${request.status.replaceAll('_', ' ').toLowerCase()}.`
-            : `"${request.title}" has been updated.`,
+          message: request.status === 'COMPLETED'
+            ? `"${request.title}" was officially closed by its creator.`
+            : request.status === 'CANCELLED'
+              ? `"${request.title}" was cancelled by its creator.`
+              : request.status !== existing.status
+                ? `"${request.title}" is now ${request.status.replaceAll('_', ' ').toLowerCase()}.`
+                : `"${request.title}" was updated by its creator.`,
           type: 'REQUEST',
           priority: request.priority,
           sourceId: request.id,
@@ -138,7 +147,7 @@ export class RequestsService {
           resourceType: 'request',
           route: `/requests/${request.id}`,
         },
-        [request.requesterId, request.assignedToId]
+        [request.requesterId, existing.assignedToId, request.assignedToId]
           .filter(recipientId => recipientId !== actorId),
         `request_updated:${request.id}:${request.updatedAt.toISOString()}`,
       );
@@ -158,6 +167,9 @@ export class RequestsService {
         assignedToId: true,
       },
     });
+    if (request.requesterId !== actorId) {
+      throw new ForbiddenException('Only the request creator can delete this request');
+    }
     await this.notifications.suppressPendingPushNotifications('request', request.id);
     await this.notifications.createForUsers(
       {
@@ -179,8 +191,24 @@ export class RequestsService {
   async status(id: string, status: string, actorId: string) {
     const existing = await this.db.request.findUniqueOrThrow({
       where: { id },
-      select: { status: true },
+      select: { status: true, requesterId: true, assignedToId: true },
     });
+    if (existing.requesterId !== actorId) {
+      if (!(await hasActivityWritePermission(this.db, actorId, 'requests'))) {
+        throw new ForbiddenException('You are not allowed to process this request');
+      }
+      const allowedTransitions: Record<string, string[]> = {
+        PENDING: ['IN_REVIEW', 'APPROVED', 'REJECTED', 'NEEDS_INFORMATION'],
+        IN_REVIEW: ['APPROVED', 'REJECTED', 'NEEDS_INFORMATION'],
+        NEEDS_INFORMATION: ['IN_REVIEW', 'APPROVED', 'REJECTED'],
+      };
+      if (
+        existing.assignedToId !== actorId ||
+        !allowedTransitions[existing.status]?.includes(status)
+      ) {
+        throw new ForbiddenException('Only the request creator or assigned user can make this workflow change');
+      }
+    }
     const request = await this.db.request.update({
       where: { id },
       data: { status: status as never },
@@ -190,7 +218,9 @@ export class RequestsService {
       await this.notifications.suppressPendingPushNotifications('request', request.id);
       await this.notifications.createForUsers(
         {
-          title: request.status === 'APPROVED'
+          title: request.status === 'COMPLETED'
+            ? 'Request closed'
+            : request.status === 'APPROVED'
             ? 'Request approved'
             : request.status === 'REJECTED'
               ? 'Request rejected'
@@ -199,7 +229,11 @@ export class RequestsService {
               : request.status === 'NEEDS_INFORMATION'
                 ? 'Additional information requested'
                 : 'Request status updated',
-          message: `"${request.title}" is now ${request.status.replaceAll('_', ' ').toLowerCase()}.`,
+          message: request.status === 'COMPLETED'
+            ? `"${request.title}" was officially closed by its creator.`
+            : request.status === 'CANCELLED'
+              ? `"${request.title}" was cancelled by its creator.`
+              : `"${request.title}" is now ${request.status.replaceAll('_', ' ').toLowerCase()}.`,
           type: 'REQUEST',
           priority: request.priority,
           sourceId: request.id,
@@ -280,10 +314,7 @@ export class RequestsService {
     if (!comment) {
       throw new NotFoundException('Request comment not found');
     }
-    if (
-      comment.authorId !== userId &&
-      !(await hasActivityWritePermission(this.db, userId, 'requests'))
-    ) {
+    if (comment.authorId !== userId) {
       throw new ForbiddenException('You are not allowed to edit this comment');
     }
     const trimmedBody = body.trim();
@@ -387,10 +418,7 @@ export class RequestsService {
     if (!attachment) {
       throw new NotFoundException('Request attachment not found');
     }
-    if (
-      attachment.uploaderId !== userId &&
-      !(await hasActivityWritePermission(this.db, userId, 'requests'))
-    ) {
+    if (attachment.uploaderId !== userId) {
       throw new ForbiddenException('You are not allowed to delete this attachment');
     }
 

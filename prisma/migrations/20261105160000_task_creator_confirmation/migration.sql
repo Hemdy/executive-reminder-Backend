@@ -1,0 +1,1 @@
+ALTER TYPE "TaskStatus" ADD VALUE 'CLOSED';

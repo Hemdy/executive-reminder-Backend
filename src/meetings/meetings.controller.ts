@@ -90,7 +90,7 @@ export class MeetingsController {
     return this.service.deleteAttachment(id, attachmentId, req.user.id);
   }
 
-  @Patch(':id') @Permissions('meetings:write') update(@Param('id') id: string, @Body() dto: UpdateMeetingDto, @Req() req: any) { return this.service.update(id, dto, req.user.id); }
-  @Patch(':id/status') @Permissions('meetings:write') status(@Param('id') id: string, @Body() dto: MeetingStatusDto, @Req() req: any) { return this.service.status(id, dto.status, req.user.id); }
-  @Delete(':id') @Permissions('meetings:write') remove(@Param('id') id: string, @Req() req: any) { return this.service.remove(id, req.user.id); }
+  @Patch(':id') update(@Param('id') id: string, @Body() dto: UpdateMeetingDto, @Req() req: any) { return this.service.update(id, dto, req.user.id); }
+  @Patch(':id/status') status(@Param('id') id: string, @Body() dto: MeetingStatusDto, @Req() req: any) { return this.service.status(id, dto.status, req.user.id); }
+  @Delete(':id') remove(@Param('id') id: string, @Req() req: any) { return this.service.remove(id, req.user.id); }
 }

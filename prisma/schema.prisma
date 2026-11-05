@@ -424,6 +424,7 @@ enum TaskStatus {
   PENDING
   IN_PROGRESS
   COMPLETED
+  CLOSED
   CANCELLED
 }
 

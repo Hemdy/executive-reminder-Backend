@@ -59,8 +59,8 @@ export class RequestsController {
   @Get() @Permissions('requests:read') list(@Req() r: any) { return this.s.list(r.user.id); }
   @Post() @Permissions('requests:write') create(@Body() d: RequestDto, @Req() r: any) { return this.s.create(d, r.user.id); }
   @Get(':id') get(@Param('id') id: string, @Req() req: any) { return this.s.get(id, req.user.id); }
-  @Patch(':id') @Permissions('requests:write') update(@Param('id') id: string, @Body() d: UpdateRequestDto, @Req() req: any) { return this.s.update(id, d, req.user.id); }
-  @Patch(':id/status') @Permissions('requests:write') status(@Param('id') id: string, @Body() dto: RequestStatusDto, @Req() req: any) { return this.s.status(id, dto.status, req.user.id); }
+  @Patch(':id') update(@Param('id') id: string, @Body() d: UpdateRequestDto, @Req() req: any) { return this.s.update(id, d, req.user.id); }
+  @Patch(':id/status') status(@Param('id') id: string, @Body() dto: RequestStatusDto, @Req() req: any) { return this.s.status(id, dto.status, req.user.id); }
 
   @Get(':id/comments') comments(@Param('id') id: string, @Req() req: any) { return this.s.listComments(id, req.user.id); }
   @Post(':id/comments') addComment(@Param('id') id: string, @Body() dto: RequestCommentDto, @Req() req: any) { return this.s.addComment(id, req.user.id, dto.body); }
@@ -95,5 +95,5 @@ export class RequestsController {
     return this.s.deleteAttachment(id, attachmentId, req.user.id);
   }
 
-  @Delete(':id') @Permissions('requests:write') remove(@Param('id') id: string, @Req() req: any) { return this.s.remove(id, req.user.id); }
+  @Delete(':id') remove(@Param('id') id: string, @Req() req: any) { return this.s.remove(id, req.user.id); }
 }

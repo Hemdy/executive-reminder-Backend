@@ -4,7 +4,6 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { hasActivityWritePermission } from '../common/activity-access';
 import { UploadedAttachmentFile } from '../common/attachment-response';
 import { PrismaService } from '../prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -122,6 +121,9 @@ export class RemindersService {
         participants: { select: { userId: true } },
       },
     });
+    if (existing.createdById !== userId) {
+      throw new ForbiddenException('Only the reminder creator can edit this reminder');
+    }
     if (participantIds) {
       await this.db.reminderParticipant.deleteMany({ where: { reminderId: id } });
     }
@@ -157,21 +159,27 @@ export class RemindersService {
       priorParticipantIds.length !== updatedParticipantIds.length ||
       priorParticipantIds.some(userId => !updatedParticipantIds.includes(userId));
     const recipients = [
+      existing.recipientId,
+      ...priorParticipantIds,
       reminder.recipientId,
       reminder.createdById,
       ...reminder.participants.map(({ userId: participantId }) => participantId),
-    ].filter(recipientId => recipientId !== userId);
+    ].filter((recipientId, index, all) =>
+      recipientId !== userId && all.indexOf(recipientId) === index
+    );
     if (scheduleChanged || contentChanged || recipientChanged || statusChanged || participantsChanged) {
       await this.notifications.suppressPendingPushNotifications('reminder', reminder.id);
       if (recipients.length) {
         await this.notifications.createForUsers(
           {
-            title: scheduleChanged
-              ? 'Reminder rescheduled'
-              : recipientChanged
+            title: reminder.status === 'CANCELLED'
+              ? 'Reminder cancelled'
+              : scheduleChanged
+                ? 'Reminder rescheduled'
+                : recipientChanged
                 ? 'Reminder reassigned'
                 : statusChanged
-                  ? reminder.status === 'CANCELLED' || reminder.status === 'DISMISSED'
+                  ? reminder.status === 'DISMISSED'
                     ? 'Reminder cancelled'
                     : reminder.status === 'COMPLETED'
                       ? 'Reminder completed'
@@ -179,11 +187,13 @@ export class RemindersService {
                   : participantsChanged
                     ? 'Reminder participants updated'
                     : 'Reminder updated',
-            message: scheduleChanged
-              ? `"${reminder.title}" is scheduled for ${reminder.reminderDate.toISOString().slice(0, 10)} at ${reminder.reminderTime}.`
-              : statusChanged
-                ? `"${reminder.title}" is now ${reminder.status.replaceAll('_', ' ').toLowerCase()}.`
-                : `"${reminder.title}" has been updated.`,
+            message: reminder.status === 'CANCELLED'
+              ? `"${reminder.title}" was cancelled by its creator.`
+              : scheduleChanged
+                ? `"${reminder.title}" was rescheduled by its creator for ${reminder.reminderDate.toISOString().slice(0, 10)} at ${reminder.reminderTime}.`
+                : statusChanged
+                  ? `"${reminder.title}" was updated by its creator and is now ${reminder.status.replaceAll('_', ' ').toLowerCase()}.`
+                  : `"${reminder.title}" was updated by its creator.`,
             type: 'REMINDER',
             priority: reminder.priority,
             sourceId: reminder.id,
@@ -212,6 +222,9 @@ export class RemindersService {
         participants: { select: { userId: true } },
       },
     });
+    if (reminder.createdById !== userId) {
+      throw new ForbiddenException('Only the reminder creator can delete this reminder');
+    }
     await this.notifications.suppressPendingPushNotifications('reminder', reminder.id);
     await this.notifications.createForUsers(
       {
@@ -234,8 +247,17 @@ export class RemindersService {
   async status(id: string, status: string, userId: string) {
     const existing = await this.db.reminder.findUniqueOrThrow({
       where: { id },
-      select: { status: true },
+      select: { status: true, recipientId: true, createdById: true },
     });
+    if (existing.createdById !== userId) {
+      const allowedTransition =
+        (existing.status === 'PENDING' && status === 'TRIGGERED') ||
+        ((existing.status === 'PENDING' || existing.status === 'TRIGGERED') &&
+          status === 'COMPLETED');
+      if (existing.recipientId !== userId || !allowedTransition) {
+        throw new ForbiddenException('Only the reminder recipient can acknowledge or complete this reminder');
+      }
+    }
     const reminder = await this.db.reminder.update({
       where: { id },
       data: { status: status as never },
@@ -255,7 +277,11 @@ export class RemindersService {
             : reminder.status === 'COMPLETED'
               ? 'Reminder completed'
               : 'Reminder status updated',
-          message: `"${reminder.title}" is now ${reminder.status.replaceAll('_', ' ').toLowerCase()}.`,
+          message: reminder.status === 'CANCELLED'
+            ? `"${reminder.title}" was cancelled by its creator.`
+            : reminder.status === 'COMPLETED'
+              ? `"${reminder.title}" was marked complete.`
+              : `"${reminder.title}" is now ${reminder.status.replaceAll('_', ' ').toLowerCase()}.`,
           type: 'REMINDER',
           priority: reminder.priority,
           sourceId: reminder.id,
@@ -337,10 +363,7 @@ export class RemindersService {
     if (!comment) {
       throw new NotFoundException('Reminder comment not found');
     }
-    if (
-      comment.authorId !== userId &&
-      !(await hasActivityWritePermission(this.db, userId, 'reminders'))
-    ) {
+    if (comment.authorId !== userId) {
       throw new ForbiddenException('You are not allowed to edit this comment');
     }
     const trimmedBody = body.trim();
@@ -444,10 +467,7 @@ export class RemindersService {
     if (!attachment) {
       throw new NotFoundException('Reminder attachment not found');
     }
-    if (
-      attachment.uploaderId !== userId &&
-      !(await hasActivityWritePermission(this.db, userId, 'reminders'))
-    ) {
+    if (attachment.uploaderId !== userId) {
       throw new ForbiddenException('You are not allowed to delete this attachment');
     }
 

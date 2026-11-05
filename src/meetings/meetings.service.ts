@@ -4,7 +4,6 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { hasActivityWritePermission } from '../common/activity-access';
 import { UploadedAttachmentFile } from '../common/attachment-response';
 import { PrismaService } from '../prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -109,6 +108,9 @@ export class MeetingsService {
         participants: { select: { userId: true } },
       },
     });
+    if (existing.organizerId !== actorId) {
+      throw new ForbiddenException('Only the meeting creator can edit this meeting');
+    }
     await this.db.meetingParticipant.deleteMany({ where: { meetingId: id } });
     const meeting = await this.db.meeting.update({
       where: { id },
@@ -134,13 +136,23 @@ export class MeetingsService {
       meeting.location !== existing.location ||
       meeting.meetingType !== existing.meetingType ||
       meeting.status !== existing.status;
+    const scheduleChanged =
+      meeting.meetingDate.getTime() !== existing.meetingDate.getTime() ||
+      meeting.startTime !== existing.startTime ||
+      meeting.endTime !== existing.endTime;
     if (participantsChanged || detailsChanged) {
       await this.notifications.suppressPendingPushNotifications('meeting', meeting.id);
       await this.notifications.createForUsers(
         {
-          title: meeting.status === 'CANCELLED' ? 'Meeting cancelled' : 'Meeting updated',
+          title: meeting.status === 'CANCELLED'
+            ? 'Meeting cancelled'
+            : scheduleChanged || meeting.status === 'RESCHEDULED'
+              ? 'Meeting rescheduled'
+              : 'Meeting updated',
           message: meeting.status === 'CANCELLED'
-            ? `"${meeting.title}" has been cancelled.`
+            ? `"${meeting.title}" was cancelled by its creator.`
+            : scheduleChanged || meeting.status === 'RESCHEDULED'
+              ? `"${meeting.title}" was rescheduled by its creator for ${meeting.meetingDate.toISOString().slice(0, 10)} at ${meeting.startTime}.`
             : `"${meeting.title}" has been updated. It is scheduled for ${meeting.meetingDate.toISOString().slice(0, 10)} at ${meeting.startTime}.`,
           type: 'MEETING',
           priority: 'MEDIUM',
@@ -151,8 +163,11 @@ export class MeetingsService {
         },
         [
           meeting.organizerId,
+          ...existing.participants.map(({ userId }) => userId),
           ...newParticipantIds,
-        ].filter(recipientId => recipientId !== actorId),
+        ].filter((recipientId, index, all) =>
+          recipientId !== actorId && all.indexOf(recipientId) === index
+        ),
         `meeting_updated:${meeting.id}:${meeting.updatedAt.toISOString()}`,
       );
     }
@@ -223,10 +238,7 @@ export class MeetingsService {
     if (!comment) {
       throw new NotFoundException('Meeting comment not found');
     }
-    if (
-      comment.authorId !== userId &&
-      !(await hasActivityWritePermission(this.db, userId, 'meetings'))
-    ) {
+    if (comment.authorId !== userId) {
       throw new ForbiddenException('You are not allowed to edit this comment');
     }
     const trimmedBody = body.trim();
@@ -329,10 +341,7 @@ export class MeetingsService {
     if (!attachment) {
       throw new NotFoundException('Meeting attachment not found');
     }
-    if (
-      attachment.uploaderId !== userId &&
-      !(await hasActivityWritePermission(this.db, userId, 'meetings'))
-    ) {
+    if (attachment.uploaderId !== userId) {
       throw new ForbiddenException('You are not allowed to delete this attachment');
     }
 
@@ -378,6 +387,9 @@ export class MeetingsService {
         participants: { select: { userId: true } },
       },
     });
+    if (meeting.organizerId !== actorId) {
+      throw new ForbiddenException('Only the meeting creator can delete this meeting');
+    }
     await this.notifications.suppressPendingPushNotifications('meeting', meeting.id);
     await this.notifications.createForUsers(
       {
@@ -400,8 +412,11 @@ export class MeetingsService {
   async status(id: string, status: string, actorId: string) {
     const existing = await this.db.meeting.findUniqueOrThrow({
       where: { id },
-      select: { status: true },
+      select: { status: true, organizerId: true },
     });
+    if (existing.organizerId !== actorId) {
+      throw new ForbiddenException('Only the meeting creator can change its status');
+    }
     const meeting = await this.db.meeting.update({
       where: { id },
       data: { status: status as never },
@@ -411,10 +426,16 @@ export class MeetingsService {
       await this.notifications.suppressPendingPushNotifications('meeting', meeting.id);
       await this.notifications.createForUsers(
         {
-          title: meeting.status === 'CANCELLED' ? 'Meeting cancelled' : 'Meeting status updated',
+          title: meeting.status === 'CANCELLED'
+            ? 'Meeting cancelled'
+            : meeting.status === 'RESCHEDULED'
+              ? 'Meeting rescheduled'
+              : 'Meeting status updated',
           message: meeting.status === 'CANCELLED'
-            ? `"${meeting.title}" has been cancelled.`
-            : `"${meeting.title}" is now ${meeting.status.replaceAll('_', ' ').toLowerCase()}.`,
+            ? `"${meeting.title}" was cancelled by its creator.`
+            : meeting.status === 'RESCHEDULED'
+              ? `"${meeting.title}" was marked rescheduled by its creator.`
+              : `"${meeting.title}" is now ${meeting.status.replaceAll('_', ' ').toLowerCase()}.`,
           type: 'MEETING',
           priority: 'MEDIUM',
           sourceId: meeting.id,
