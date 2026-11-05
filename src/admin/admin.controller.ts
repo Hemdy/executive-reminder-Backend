@@ -80,14 +80,18 @@ export class AdminController {
   @Get('users')
   @Permissions('users:view')
   users() {
-    return this.db.user.findMany({ select: userSelect, orderBy: { createdAt: 'desc' } });
+    return this.db.user.findMany({
+      where: { deletedAt: null },
+      select: userSelect,
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
   @Get('users/directory')
   @Permissions('users:assign')
   userDirectory() {
     return this.db.user.findMany({
-      where: { isActive: true },
+      where: { isActive: true, deletedAt: null },
       select: {
         id: true,
         title: true,
@@ -205,8 +209,28 @@ export class AdminController {
   @Patch('users/:id/status')
   @Permissions('users:edit')
   async setUserActive(@Param('id') id: string, @Body() dto: ActiveDto) {
-    await this.requireUser(id);
-    const updated = await this.db.user.update({ where: { id }, data: { isActive: dto.isActive }, select: userSelect });
+    const updated = await this.userTransaction(async tx => {
+      const user = await tx.user.findFirst({
+        where: { id, deletedAt: null },
+        select: {
+          id: true,
+          isActive: true,
+          role: true,
+          roleRef: { select: { name: true } },
+        },
+      });
+      if (!user) {
+        throw new NotFoundException('User not found');
+      }
+      if (user.isActive && !dto.isActive) {
+        await this.ensureNotLastActiveAdministrator(tx, user);
+      }
+      return tx.user.update({
+        where: { id },
+        data: { isActive: dto.isActive },
+        select: userSelect,
+      });
+    });
     if (dto.isActive) {
       await this.notifications.dispatchNotification({
         title: 'Account Re-activated',
@@ -223,9 +247,26 @@ export class AdminController {
   @Delete('users/:id')
   @Permissions('users:delete')
   async deleteUser(@Param('id') id: string) {
-    await this.requireUser(id);
-    await this.db.user.delete({ where: { id } });
-    return { id, deleted: true };
+    await this.userTransaction(async tx => {
+      const user = await tx.user.findFirst({
+        where: { id, deletedAt: null },
+        select: {
+          id: true,
+          isActive: true,
+          role: true,
+          roleRef: { select: { name: true } },
+        },
+      });
+      if (!user) {
+        throw new NotFoundException('User not found');
+      }
+      await this.ensureNotLastActiveAdministrator(tx, user);
+      await tx.user.update({
+        where: { id },
+        data: { isActive: false, deletedAt: new Date() },
+      });
+    });
+    return { id, deleted: true, softDeleted: true };
   }
 
   @Put('roles/:id')
@@ -262,9 +303,51 @@ export class AdminController {
   }
 
   private async requireUser(id: string) {
-    const user = await this.db.user.findUnique({ where: { id } });
+    const user = await this.db.user.findFirst({ where: { id, deletedAt: null } });
     if (!user) throw new NotFoundException('User not found');
     return user;
+  }
+
+  private async ensureNotLastActiveAdministrator(
+    tx: Prisma.TransactionClient,
+    user: { isActive: boolean; role: string; roleRef: { name: string } | null },
+  ): Promise<void> {
+    const isAdministrator =
+      user.roleRef?.name.toUpperCase() === 'ADMIN' || user.role.toUpperCase() === 'ADMIN';
+    if (!user.isActive || !isAdministrator) {
+      return;
+    }
+
+    const activeUsers = await tx.user.findMany({
+      where: { isActive: true, deletedAt: null },
+      select: { role: true, roleRef: { select: { name: true } } },
+    });
+    const activeAdministratorCount = activeUsers.filter(candidate =>
+      candidate.roleRef?.name.toUpperCase() === 'ADMIN' ||
+      candidate.role.toUpperCase() === 'ADMIN'
+    ).length;
+
+    if (activeAdministratorCount <= 1) {
+      throw new ConflictException('The last active administrator cannot be deactivated or deleted');
+    }
+  }
+
+  private async userTransaction<T>(
+    operation: (tx: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await this.db.$transaction(operation, {
+        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
+        throw new NotFoundException('User not found');
+      }
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
+        throw new ConflictException('User status changed concurrently. Please try again.');
+      }
+      throw error;
+    }
   }
 
   private async requireRole(id: string) {

@@ -30,7 +30,9 @@ export class PermissionsGuard implements CanActivate {
     const user = context.switchToHttp().getRequest().user as { id: string };
     if (!user?.id) throw new UnauthorizedException();
     const record = await this.prisma.user.findUnique({ where: { id: user.id }, include: { roleRef: { include: { permissions: { include: { permission: true } } } } } });
-    if (!record?.isActive) throw new ForbiddenException('Inactive users cannot access protected resources');
+    if (!record?.isActive || record.deletedAt !== null) {
+      throw new ForbiddenException('Inactive users cannot access protected resources');
+    }
     const role = record.roleRef ?? await this.prisma.role.findUnique({
       where: { name: record.role },
       include: { permissions: { include: { permission: true } } }

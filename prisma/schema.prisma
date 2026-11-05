@@ -19,6 +19,7 @@ model User {
   passwordHash         String
   role                 String                @default("EMPLOYEE")
   isActive             Boolean               @default(true)
+  deletedAt            DateTime?
   department           String?
   avatarUrl            String?
   roleId               String?

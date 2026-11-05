@@ -21,6 +21,7 @@ export class AuthService {
       : null);
     if (
       !user?.isActive ||
+      user.deletedAt !== null ||
       !assignedRole?.isActive ||
       !(await bcrypt.compare(password, user.passwordHash))
     )
@@ -53,7 +54,9 @@ export class AuthService {
     const assignedRole = user?.roleRef ?? (user
       ? await this.prisma.role.findUnique({ where: { name: user.role } })
       : null);
-    if (!user?.isActive || !assignedRole?.isActive) throw new UnauthorizedException();
+    if (!user?.isActive || user.deletedAt !== null || !assignedRole?.isActive) {
+      throw new UnauthorizedException();
+    }
     return user;
   }
 }
