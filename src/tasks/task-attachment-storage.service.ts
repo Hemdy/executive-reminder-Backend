@@ -11,6 +11,7 @@ import {
   ALLOWED_ATTACHMENT_TYPES,
   DownloadableAttachment,
   MAX_ATTACHMENT_SIZE,
+  TASK_ALLOWED_ATTACHMENT_TYPES,
   UploadedAttachmentFile,
 } from '../common/attachment-response';
 
@@ -76,12 +77,26 @@ export class TaskAttachmentStorageService {
     }
 
     const extension = extname(fileName).toLowerCase();
-    const fileType = ALLOWED_ATTACHMENT_TYPES.get(extension);
+    const allowedTypes = scope === 'tasks' ? TASK_ALLOWED_ATTACHMENT_TYPES : ALLOWED_ATTACHMENT_TYPES;
+    const fileType = allowedTypes.get(extension);
     if (!fileType) {
-      throw new BadRequestException('Only valid PDF and Word documents are supported');
+      throw new BadRequestException(
+        scope === 'tasks'
+          ? 'This task attachment type is not supported'
+          : 'Only valid PDF and Word documents are supported',
+      );
     }
 
-    if (!this.hasValidFileSignature(extension, file.buffer)) {
+    const mimeType = (file.mimetype || '').toLowerCase();
+    if (
+      mimeType &&
+      mimeType !== 'application/octet-stream' &&
+      !fileType.mimeTypes.includes(mimeType)
+    ) {
+      throw new BadRequestException('The uploaded file MIME type does not match its extension');
+    }
+
+    if (!this.hasValidFileSignature(extension, file.buffer, allowedTypes)) {
       throw new BadRequestException('The uploaded file content does not match its file type');
     }
 
@@ -350,27 +365,121 @@ export class TaskAttachmentStorageService {
     return { provider: 'database' };
   }
 
-  private hasValidFileSignature(extension: string, content: Buffer): boolean {
-    const type = ALLOWED_ATTACHMENT_TYPES.get(extension);
+  private hasValidFileSignature(
+    extension: string,
+    content: Buffer,
+    allowedTypes: Map<string, { mimeType: string; mimeTypes: string[]; signature?: Buffer }>,
+  ): boolean {
+    const type = allowedTypes.get(extension);
     if (!type) {
       return false;
     }
 
     if (extension === '.pdf') {
       // ISO 32000-1 permits the %PDF- header anywhere within the first 1024 bytes.
-      return content.subarray(0, 1024).includes(type.signature);
+      const signature = type.signature;
+      return Boolean(signature && content.subarray(0, 1024).includes(signature));
     }
 
-    if (!content.subarray(0, type.signature.length).equals(type.signature)) {
+    if (extension === '.csv') {
+      return this.isTextFile(content);
+    }
+
+    if (extension === '.svg') {
+      return this.isSafeSvg(content);
+    }
+
+    if (!type.signature || !content.subarray(0, type.signature.length).equals(type.signature)) {
       return false;
     }
 
-    if (extension !== '.docx') {
+    if (extension === '.webp') {
+      return content.length >= 12 && content.toString('ascii', 8, 12) === 'WEBP';
+    }
+    if (extension === '.gif') {
+      return content.length >= 6 &&
+        ['GIF87a', 'GIF89a'].includes(content.toString('ascii', 0, 6));
+    }
+    if (extension !== '.docx' && extension !== '.xlsx') {
       return true;
     }
 
-    const archiveNames = content.toString('latin1');
-    return archiveNames.includes('[Content_Types].xml') && archiveNames.includes('word/');
+    return extension === '.docx'
+      ? this.hasZipEntries(content, ['[Content_Types].xml', 'word/document.xml'])
+      : this.hasZipEntries(content, ['[Content_Types].xml', 'xl/workbook.xml']);
+  }
+
+  private hasZipEntries(content: Buffer, requiredEntries: string[]): boolean {
+    const endOfDirectorySignature = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+    const directorySignature = Buffer.from([0x50, 0x4b, 0x01, 0x02]);
+    const endOffset = content.lastIndexOf(endOfDirectorySignature);
+    if (endOffset < 0 || endOffset + 22 > content.length) {
+      return false;
+    }
+
+    const commentLength = content.readUInt16LE(endOffset + 20);
+    const directoryEntries = content.readUInt16LE(endOffset + 10);
+    const directorySize = content.readUInt32LE(endOffset + 12);
+    const directoryOffset = content.readUInt32LE(endOffset + 16);
+    const directoryEnd = directoryOffset + directorySize;
+    if (
+      endOffset + 22 + commentLength !== content.length ||
+      directoryEnd > endOffset ||
+      directoryEntries === 0
+    ) {
+      return false;
+    }
+
+    const entries = new Set<string>();
+    let cursor = directoryOffset;
+    for (let index = 0; index < directoryEntries; index += 1) {
+      if (
+        cursor + 46 > directoryEnd ||
+        !content.subarray(cursor, cursor + 4).equals(directorySignature)
+      ) {
+        return false;
+      }
+      const nameLength = content.readUInt16LE(cursor + 28);
+      const extraLength = content.readUInt16LE(cursor + 30);
+      const entryCommentLength = content.readUInt16LE(cursor + 32);
+      const entryEnd = cursor + 46 + nameLength + extraLength + entryCommentLength;
+      if (entryEnd > directoryEnd) {
+        return false;
+      }
+      entries.add(content.toString('utf8', cursor + 46, cursor + 46 + nameLength));
+      cursor = entryEnd;
+    }
+
+    return cursor === directoryEnd && requiredEntries.every(entry => entries.has(entry));
+  }
+
+  private isTextFile(content: Buffer): boolean {
+    if (content.includes(0)) {
+      return false;
+    }
+    try {
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(content);
+      return !/[\u0001-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text);
+    } catch (error) {
+      if (error instanceof TypeError) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  private isSafeSvg(content: Buffer): boolean {
+    let markup: string;
+    try {
+      markup = new TextDecoder('utf-8', { fatal: true }).decode(content);
+    } catch (error) {
+      if (error instanceof TypeError) {
+        return false;
+      }
+      throw error;
+    }
+    return /<svg(?:\s|>)/i.test(markup) &&
+      !/<!DOCTYPE|<!ENTITY|<script\b|<foreignObject\b|\bon[a-z]+\s*=|javascript\s*:|@import|(?:href|src)\s*=\s*["']\s*(?:https?:|\/\/|data:)|url\s*\(/i.test(markup);
   }
 
   private decodeOriginalFilename(rawName: string): string {

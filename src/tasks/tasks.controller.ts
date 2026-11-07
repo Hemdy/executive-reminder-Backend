@@ -17,7 +17,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
 import {
-  attachmentMulterOptions,
+  taskAttachmentMulterOptions,
   sendAttachment,
   UploadedAttachmentFile,
 } from '../common/attachment-response';
@@ -85,7 +85,7 @@ export class TasksController {
 
   @Post(':id/attachments')
   @Header('Cache-Control', 'private, no-store')
-  @UseInterceptors(FileInterceptor('file', attachmentMulterOptions))
+  @UseInterceptors(FileInterceptor('file', taskAttachmentMulterOptions))
   addAttachment(
     @Param('id') id: string,
     @Req() req: any,

@@ -240,7 +240,8 @@ Tasks support comments at `GET/POST /tasks/:id/comments` and file metadata at
 `GET /tasks/:id/attachments`. Upload with multipart field `file` to
 `POST /tasks/:id/attachments` and download an attachment from
 `GET /tasks/:id/attachments/:attachmentId`. Attachments are limited to 4 MB and
-only PDF, DOC, and DOCX files are accepted. File bytes are stored in a private
+task attachments accept PDF, DOC, DOCX, XLS, XLSX, CSV, JPG, JPEG, PNG, GIF,
+WEBP, and SVG files. File bytes are stored in a private
 Supabase Storage bucket; PostgreSQL stores attachment metadata and the object
 path. Set `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and optionally
 `SUPABASE_STORAGE_BUCKET` in the backend environment, and create the bucket
