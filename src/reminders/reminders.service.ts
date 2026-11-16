@@ -51,7 +51,7 @@ export class RemindersService {
         ],
       },
       include: this.reminderInclude,
-      orderBy: { reminderDate: 'asc' },
+      orderBy: [{ reminderDate: 'desc' }, { reminderTime: 'desc' }, { createdAt: 'desc' }],
     });
   }
 

@@ -44,7 +44,7 @@ export class MeetingsService {
     return this.db.meeting.findMany({
       where: { OR: [{ organizerId: userId }, { participants: { some: { userId } } }] },
       include: this.meetingInclude,
-      orderBy: { meetingDate: 'asc' },
+      orderBy: [{ meetingDate: 'desc' }, { startTime: 'desc' }, { createdAt: 'desc' }],
     });
   }
 

@@ -49,7 +49,7 @@ export class TasksService {
         ? undefined
         : { OR: [{ assignedToId: userId }, { createdById: userId }] },
       include: this.taskInclude,
-      orderBy: { dueDate: 'asc' }
+      orderBy: [{ dueDate: 'desc' }, { dueTime: 'desc' }, { createdAt: 'desc' }]
     });
   }
 
